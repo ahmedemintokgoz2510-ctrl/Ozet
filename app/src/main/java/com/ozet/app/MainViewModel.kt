@@ -1,9 +1,14 @@
 package com.ozet.app
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ozet.app.data.HistoryItem
+import com.ozet.app.data.HistoryStore
+import com.ozet.app.data.sizeOf
+import com.ozet.app.data.typeOf
 import com.ozet.app.engine.Extractor
 import com.ozet.app.engine.Length
 import com.ozet.app.engine.Mode
@@ -21,7 +26,10 @@ import kotlinx.coroutines.withContext
 
 sealed interface UiState {
     data object Home : UiState
+    data object History : UiState
+    data object Settings : UiState
     data object Paste : UiState
+    data object Loading : UiState
     data class Working(val secondsLeft: Int, val ready: Boolean) : UiState
     data class Done(val result: Result, val mode: Mode, val length: Length, val fileName: String) : UiState
     data class Error(val message: String) : UiState
@@ -33,17 +41,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val WAIT = 10
     }
 
+    private val store = HistoryStore(app)
+    private val settings = app.getSharedPreferences("ozet_settings", Context.MODE_PRIVATE)
+
     private val _state = MutableStateFlow<UiState>(UiState.Home)
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    private val _history = MutableStateFlow(store.load())
+    val history: StateFlow<List<HistoryItem>> = _history.asStateFlow()
+
+    private val _defaultLength = MutableStateFlow(readLength())
+    val defaultLength: StateFlow<Length> = _defaultLength.asStateFlow()
 
     private var text = ""
     private var name = ""
     private var mode = Mode.AUTO
-    private var length = Length.MEDIUM
+    private var length = _defaultLength.value
     private var job: Job? = null
 
-    fun openPaste() {
-        _state.value = UiState.Paste
+    private fun readLength(): Length = try {
+        Length.valueOf(settings.getString("length", "MEDIUM") ?: "MEDIUM")
+    } catch (e: Exception) {
+        Length.MEDIUM
     }
 
     fun goHome() {
@@ -51,22 +70,75 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = UiState.Home
     }
 
+    fun showHistory() {
+        job?.cancel()
+        _state.value = UiState.History
+    }
+
+    fun showSettings() {
+        _state.value = UiState.Settings
+    }
+
+    fun openPaste() {
+        _state.value = UiState.Paste
+    }
+
+    fun setDefaultLength(l: Length) {
+        settings.edit().putString("length", l.name).apply()
+        _defaultLength.value = l
+        length = l
+    }
+
+    fun deleteHistory(id: String) {
+        _history.value = store.remove(id)
+    }
+
+    fun clearHistory() {
+        _history.value = store.clear()
+    }
+
     fun openUri(uri: Uri) {
         val ctx = getApplication<Application>()
-        start(Extractor.displayName(ctx, uri)) { Extractor.extract(ctx, uri) }
+        val n = Extractor.displayName(ctx, uri)
+        start(n, typeOf(n), sizeOf(ctx, uri)) { Extractor.extract(ctx, uri) }
     }
 
     fun submitText(pasted: String) {
-        start("Yapıştırılan metin") { pasted }
+        val first = pasted.trim().lineSequence().firstOrNull()?.trim().orEmpty()
+        val label = if (first.length > 32) first.substring(0, 32) + "…" else first
+        start(label.ifEmpty { "Yapıştırılan metin" }, "METIN", pasted.toByteArray().size.toLong()) { pasted }
+    }
+
+    fun openHistory(item: HistoryItem) {
+        job?.cancel()
+        name = item.name
+        mode = Mode.AUTO
+        _state.value = UiState.Loading
+        job = viewModelScope.launch {
+            val r = withContext(Dispatchers.Default) {
+                runCatching {
+                    val t = withContext(Dispatchers.IO) { store.readText(item.id) }
+                        ?: error("Bu dosyanın kaydı bulunamadı.")
+                    Pair(t, Summarizer.summarize(t, mode, length))
+                }
+            }
+            r.onSuccess { p ->
+                text = p.first
+                _state.value = UiState.Done(p.second, mode, length, name)
+            }.onFailure { e ->
+                _state.value = UiState.Error(e.message ?: "Dosya açılamadı.")
+            }
+        }
     }
 
     fun setMode(m: Mode) = resummarize(m, length)
 
     fun setLength(l: Length) = resummarize(mode, l)
 
-    private fun start(label: String, load: suspend () -> String) {
+    private fun start(label: String, type: String, size: Long, load: suspend () -> String) {
         job?.cancel()
         name = label
+        mode = Mode.AUTO
         _state.value = UiState.Working(WAIT, false)
         job = viewModelScope.launch {
             val work = async(Dispatchers.Default) {
@@ -88,6 +160,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val outcome = work.await()
             outcome.onSuccess { pair ->
                 text = pair.first
+                val saved = withContext(Dispatchers.IO) { store.add(label, type, size, pair.first) }
+                _history.value = saved
                 _state.value = UiState.Done(pair.second, mode, length, name)
             }.onFailure { e ->
                 _state.value = UiState.Error(e.message ?: "Dosya okunamadı.")
