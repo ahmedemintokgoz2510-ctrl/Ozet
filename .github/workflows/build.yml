@@ -16,8 +16,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug
+      - name: Derle
+        run: |
+          DIR=$(dirname "$(find . -name settings.gradle.kts -not -path '*/node_modules/*' | head -n 1)")
+          echo "Proje klasoru: $DIR"
+          cd "$DIR"
+          gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: ozet-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: "**/build/outputs/apk/debug/*.apk"
