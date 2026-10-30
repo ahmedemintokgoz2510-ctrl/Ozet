@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Ozet" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFF7F5F0</item>
+    </style>
+</resources>
