@@ -12,13 +12,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
+      - name: Lisanslari kabul et
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Derle
         run: |
-          DIR=$(dirname "$(find . -name settings.gradle.kts -not -path '*/node_modules/*' | head -n 1)")
+          DIR=$(dirname "$(find . -name settings.gradle.kts | head -n 1)")
           echo "Proje klasoru: $DIR"
           cd "$DIR"
           gradle assembleDebug --stacktrace
