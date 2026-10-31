@@ -104,6 +104,8 @@ object Summarizer {
     private val TR_COP_END = Regex("^\\p{L}{5,}(d[ıiuü]r|t[ıiuü]r)$")
     private val TR_CASE_END = Regex("^\\p{L}{4,}(de|da|den|dan|nin|nın|nun|nün|yle|yla)$")
     private val FR_PART = Regex("^\\p{L}{4,}(é|ée|és|ées)$")
+    private val TR_ORPHAN = Regex("^\\p{L}+\\s+(gibi|ise)\\s|^(birincisi|ikincisi|üçüncüsü|dördüncüsü)\\s")
+    private val TR_SUFFIX = Regex("(ndeki|daki|deki|taki|teki|lerin|ların|leri|ları|ler|lar|nin|nın|nun|nün|den|dan|ten|tan|ında|inde|unda|ünde|nda|nde|ın|un|ün|ye|ya)$")
     private val PCT = Regex("%|٪|yüzde|percent|prozent|por ciento|pour cent|بالمئة|في المائة|بالمائة")
 
     // ------------------------------------------------------------------ giris noktasi
@@ -385,7 +387,7 @@ object Summarizer {
                     var shared = 0
                     for (x in t.stemSet) if (x in h.stemSet) shared++
                     val near = j - i <= 4 && t.para == h.para
-                    if (!t.isClass && ((first != null && first in h.stemSet) || (near && shared >= 2))) {
+                    if (!t.isClass && ((first != null && first in h.stemSet) || (near && shared >= 2) || (ann in 2..8 && near))) {
                         t.member = true; t.head = h.idx; found++
                     }
                 }
@@ -702,7 +704,7 @@ object Summarizer {
         // 3b) Sınıflandırmayı duyuran cümleler ("... iki gruba ayrılır") mutlaka özette olsun
         var headAdded = 0
         for (h in sents.filter { it.isClass && !it.bullet && !it.dialogue }.sortedByDescending { it.score }) {
-            if (headAdded >= max(2, target / 4)) break
+            if (headAdded >= max(3, target / 3)) break
             if (h !in chosen && (announced(h, pack) > 0 || h.text.contains(':'))) { add(h); headAdded++ }
         }
 
@@ -726,6 +728,18 @@ object Summarizer {
                 }
             }
             if (!changed) break
+        }
+        // 4b) Üyenin hemen ardından gelen "Bu aşama ..." gibi açıklama cümleleri
+        run {
+            var cap = max(2, target / 4)
+            for (s in chosen.toList().sortedBy { it.idx }) {
+                if (cap <= 0) break
+                if (s.head < 0 || s.idx + 1 >= n) continue
+                val nx = sents[s.idx + 1]
+                if (nx !in chosen && nx.para == s.para && nx.heading == s.heading && !nx.dialogue &&
+                    pack.anaphora.containsMatchIn(nx.lower) && !nx.isClass
+                ) { add(nx); cap-- }
+            }
         }
 
         // 5) Doğrulama: önemli tarih / sayı / yüzde / isim kaybolmasın
@@ -755,13 +769,28 @@ object Summarizer {
         }
 
         // 6) Kendi başına anlaşılabilirlik: "Bu / Ayrıca / However" ile başlayan cümlenin önceki cümlesi
-        val ctxCap = max(1, target / 5)
+        val ctxCap = max(2, target / 3)
         var ctx = 0
         for (s in chosen.toList().sortedBy { it.idx }) {
             if (ctx >= ctxCap) break
-            if (s.idx > 0 && pack.anaphora.containsMatchIn(s.lower)) {
+            val orphan = pack.code == "tr" && TR_ORPHAN.containsMatchIn(s.lower)
+            if (s.idx > 0 && (pack.anaphora.containsMatchIn(s.lower) || orphan)) {
                 val p = sents[s.idx - 1]
                 if (p !in chosen && p.para == s.para && p.heading == s.heading && !p.dialogue) { add(p); ctx++ }
+                if (orphan) {
+                    // "Mitokondri gibi ...", "Telofazda ise ..." gibi cümleler: önceki paralel cümleler de gelsin
+                    val tail = s.text.substringBefore(' ').takeLast(2).lowercase(pack.locale)
+                    var k = s.idx - 2
+                    var extra = 0
+                    while (k >= 0 && extra < 3) {
+                        val q = sents[k]
+                        if (q.para != s.para || q.heading != s.heading || q.dialogue) break
+                        val parallel = q.text.substringBefore(' ').takeLast(2).lowercase(pack.locale) == tail
+                        if (!parallel && extra >= 1) break
+                        if (q !in chosen) { add(q); ctx++ }
+                        extra++; k--
+                    }
+                }
             }
         }
 
@@ -771,6 +800,23 @@ object Summarizer {
                 if (g.members.none { it in chosen }) {
                     val best = g.members.maxByOrNull { it.score } ?: continue
                     add(best)
+                }
+            }
+        }
+
+        // 7b) Büyük bölümler orantısız şekilde boş kalmasın
+        if (groups.size > 1) {
+            val pool = if (groups.size <= max(8, target * 2)) groups else orderedGroups
+            val share = target.toDouble() / n
+            for (g in pool) {
+                if (g.members.size < 3) continue
+                val want = min(4, max(1, (g.members.size * share * 0.7).roundToInt()))
+                var have = g.members.count { it in chosen }
+                if (have >= want) continue
+                for (s in g.members.sortedByDescending { it.score }) {
+                    if (have >= want) break
+                    if (s in chosen || s.dialogue || redundant(s, chosen)) continue
+                    add(s); have++
                 }
             }
         }
@@ -881,8 +927,18 @@ object Summarizer {
         return m.filter { it.value * 2 >= mx }.keys.minByOrNull { it.length } ?: m.keys.first()
     }
 
-    private fun titleWord(low: String, acro: Boolean, pack: LangPack): String =
-        if (acro) low.uppercase(Locale.ROOT) else low.replaceFirstChar { c -> c.titlecase(pack.locale) }
+    /** Türkçe çekim ekini görüntüde kaldırır ("bitkilerin" -> "bitki"); kalan kısım en az 4 harf olmalı. */
+    private fun trBase(w: String): String {
+        val m = TR_SUFFIX.find(w) ?: return w
+        val base = w.substring(0, m.range.first)
+        return if (base.length >= 4) base else w
+    }
+
+    private fun titleWord(low: String, acro: Boolean, pack: LangPack): String {
+        if (acro) return low.uppercase(Locale.ROOT)
+        val w = if (pack.code == "tr") trBase(low) else low
+        return w.replaceFirstChar { c -> c.titlecase(pack.locale) }
+    }
 
     /**
      * Aday anahtar kelimeler: tek kelime ve iki kelimelik kavramlar ("Makine Öğrenmesi").
