@@ -1,5 +1,6 @@
 package com.ozet.app.ui
 
+import android.app.Activity
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -39,6 +40,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +50,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -67,13 +73,17 @@ import com.ozet.app.MainViewModel
 import com.ozet.app.R
 import com.ozet.app.UiState
 import com.ozet.app.data.HistoryItem
-import com.ozet.app.data.formatDate
-import com.ozet.app.data.formatSize
+import com.ozet.app.engine.Err
+import com.ozet.app.engine.SecTitle
+import com.ozet.app.engine.Section
+import com.ozet.app.i18n.APP_VERSION
+import com.ozet.app.i18n.AppLang
+import com.ozet.app.i18n.StrTr
+import com.ozet.app.i18n.Strings
 import com.ozet.app.engine.Length
 import com.ozet.app.engine.Mode
 import com.ozet.app.engine.Result
 import com.ozet.app.engine.SectionKind
-import java.util.Locale
 
 private val ALL_TYPES = arrayOf(
     "application/pdf",
@@ -84,6 +94,31 @@ private val PDF_TYPES = arrayOf("application/pdf")
 private val DOCX_TYPES = arrayOf("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 private val TXT_TYPES = arrayOf("text/plain")
 
+val LocalStrings = staticCompositionLocalOf { StrTr }
+val LocalLang = staticCompositionLocalOf { AppLang.TR }
+
+/** Sağdan sola dillerde (Arapça) yön okları aynalanır. */
+@Composable
+private fun Modifier.mirror(): Modifier =
+    if (LocalLayoutDirection.current == LayoutDirection.Rtl) this.scale(-1f, 1f) else this
+
+private fun secTitle(sec: Section, st: Strings): String? = sec.title ?: when (sec.key) {
+    SecTitle.SUMMARY -> st.secSummary
+    SecTitle.TURNING -> st.secTurning
+    SecTitle.NOTES -> st.secNotes
+    SecTitle.GENERAL -> st.secGeneral
+    SecTitle.CUSTOM -> null
+}
+
+private fun errText(k: Err, st: Strings): String = when (k) {
+    Err.NO_TEXT -> st.errNoText
+    Err.TOO_SHORT -> st.errTooShort
+    Err.ENCRYPTED -> st.errEncrypted
+    Err.NOT_FOUND -> st.errNotFound
+    Err.OPEN -> st.errOpen
+    Err.READ -> st.errRead
+}
+
 // ---------------------------------------------------------------- ana iskelet
 
 @Composable
@@ -91,6 +126,7 @@ fun App(vm: MainViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val history by vm.history.collectAsStateWithLifecycle()
     val defLen by vm.defaultLength.collectAsStateWithLifecycle()
+    val lang by vm.lang.collectAsStateWithLifecycle()
     val view = LocalView.current
     val working = state is UiState.Working
 
@@ -104,6 +140,11 @@ fun App(vm: MainViewModel) {
         if (uri != null) vm.openUri(uri)
     }
 
+    CompositionLocalProvider(
+        LocalStrings provides lang.strings,
+        LocalLang provides lang,
+        LocalLayoutDirection provides (if (lang.rtl) LayoutDirection.Rtl else LayoutDirection.Ltr)
+    ) {
     Scaffold(
         containerColor = Pal.Bg,
         bottomBar = {
@@ -138,6 +179,8 @@ fun App(vm: MainViewModel) {
                 is UiState.Settings -> SettingsScreen(
                     defLen = defLen,
                     historyCount = history.size,
+                    lang = lang,
+                    onLang = vm::setLang,
                     onLength = vm::setDefaultLength,
                     onClear = vm::clearHistory,
                     onBack = vm::goHome
@@ -146,9 +189,10 @@ fun App(vm: MainViewModel) {
                 is UiState.Loading -> LoadingScreen()
                 is UiState.Working -> WorkingScreen(s)
                 is UiState.Done -> ResultScreen(s, vm::setMode, vm::setLength, vm::goHome)
-                is UiState.Error -> ErrorScreen(s.message, vm::goHome)
+                is UiState.Error -> ErrorScreen(s.kind, vm::goHome)
             }
         }
+    }
     }
 }
 
@@ -211,7 +255,7 @@ private fun TopBar(title: String, onBack: () -> Unit) {
             Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onBack),
             contentAlignment = Alignment.Center
         ) {
-            Icon(painterResource(R.drawable.ic_arrow_back), "Geri", tint = Pal.Ink, modifier = Modifier.size(24.dp))
+            Icon(painterResource(R.drawable.ic_arrow_back), LocalStrings.current.back, tint = Pal.Ink, modifier = Modifier.size(24.dp).mirror())
         }
         Spacer(Modifier.width(4.dp))
         Text(
@@ -244,19 +288,22 @@ private fun NavBar(homeSelected: Boolean, onHome: () -> Unit, onHistory: () -> U
     Column(Modifier.fillMaxWidth().background(Color.White)) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Pal.Line))
         Row(Modifier.fillMaxWidth()) {
-            NavItem("Ana Sayfa", R.drawable.ic_home, homeSelected, onHome, Modifier.weight(1f))
-            NavItem("Geçmiş", R.drawable.ic_description, !homeSelected, onHistory, Modifier.weight(1f))
+            val st = LocalStrings.current
+            NavItem(st.navHome, R.drawable.ic_home, homeSelected, onHome, Modifier.weight(1f))
+            NavItem(st.navHistory, R.drawable.ic_description, !homeSelected, onHistory, Modifier.weight(1f))
         }
     }
 }
 
 @Composable
 private fun HistoryRow(item: HistoryItem, onClick: () -> Unit, trailing: @Composable () -> Unit) {
-    val typeLabel = if (item.type == "METIN") "Metin" else item.type
+    val st = LocalStrings.current
+    val lang = LocalLang.current
+    val typeLabel = if (item.type == "METIN") st.tileText else item.type
     val meta = buildString {
         append(typeLabel)
-        if (item.sizeBytes > 0) append("  •  ").append(formatSize(item.sizeBytes))
-        append("  •  ").append(formatDate(item.dateMillis))
+        if (item.sizeBytes > 0) append("  •  ").append(lang.formatSize(item.sizeBytes))
+        append("  •  ").append(lang.formatDate(item.dateMillis))
     }
     Row(
         modifier = Modifier.fillMaxWidth().clip(R16).background(Color.White)
@@ -315,6 +362,7 @@ private fun HomeScreen(
     onSettings: () -> Unit,
     onOpen: (HistoryItem) -> Unit
 ) {
+    val st = LocalStrings.current
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 16.dp)
@@ -329,14 +377,14 @@ private fun HomeScreen(
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Özetle", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
-                    Text("Uzun metinleri, kısa ve öz hale getir.", fontSize = 14.sp, color = Pal.Sub)
+                    Text(st.appName, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+                    Text(st.tagline, fontSize = 14.sp, color = Pal.Sub)
                 }
                 Box(
                     Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onSettings),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(painterResource(R.drawable.ic_settings), "Ayarlar", tint = Pal.Ink, modifier = Modifier.size(28.dp))
+                    Icon(painterResource(R.drawable.ic_settings), st.settings, tint = Pal.Ink, modifier = Modifier.size(28.dp))
                 }
             }
             Spacer(Modifier.height(22.dp))
@@ -362,10 +410,10 @@ private fun HomeScreen(
                     }
                     Spacer(Modifier.width(20.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Dosya Seç", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(st.pickFile, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "PDF, DOCX, TXT veya metin kopyala-yapıştır ile özet oluştur.",
+                            st.pickFileDesc,
                             fontSize = 14.sp,
                             color = Color.White.copy(alpha = 0.92f)
                         )
@@ -375,25 +423,25 @@ private fun HomeScreen(
                         Modifier.size(46.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.18f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(painterResource(R.drawable.ic_arrow_forward), null, tint = Color.White, modifier = Modifier.size(24.dp))
+                        Icon(painterResource(R.drawable.ic_arrow_forward), null, tint = Color.White, modifier = Modifier.size(24.dp).mirror())
                     }
                 }
             }
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Tile("PDF", "PDF", "Dosya seç", onPickPdf, Modifier.weight(1f))
-                Tile("DOCX", "DOCX", "Dosya seç", onPickDocx, Modifier.weight(1f))
-                Tile("TXT", "TXT", "Dosya seç", onPickTxt, Modifier.weight(1f))
-                Tile("METIN", "Metin", "Yapıştır", onPaste, Modifier.weight(1f))
+                Tile("PDF", "PDF", st.tileSubPick, onPickPdf, Modifier.weight(1f))
+                Tile("DOCX", "DOCX", st.tileSubPick, onPickDocx, Modifier.weight(1f))
+                Tile("TXT", "TXT", st.tileSubPick, onPickTxt, Modifier.weight(1f))
+                Tile("METIN", st.tileText, st.tileSubPaste, onPaste, Modifier.weight(1f))
             }
             Spacer(Modifier.height(28.dp))
-            Text("Son Dosyalar", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+            Text(st.recentFiles, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
             Spacer(Modifier.height(12.dp))
         }
         if (history.isEmpty()) {
             item {
                 Text(
-                    "Henüz dosya yok. İlk dosyanı seç, burada görünsün.",
+                    st.noFilesYet,
                     color = Pal.Sub,
                     fontSize = 14.sp
                 )
@@ -401,7 +449,7 @@ private fun HomeScreen(
         } else {
             items(history.take(5), key = { it.id }) { h ->
                 HistoryRow(h, onClick = { onOpen(h) }) {
-                    Icon(painterResource(R.drawable.ic_chevron_right), null, tint = Pal.Sub, modifier = Modifier.size(24.dp))
+                    Icon(painterResource(R.drawable.ic_chevron_right), null, tint = Pal.Sub, modifier = Modifier.size(24.dp).mirror())
                 }
                 Spacer(Modifier.height(10.dp))
             }
@@ -427,21 +475,22 @@ private fun Tile(type: String, label: String, sub: String, onClick: () -> Unit, 
 
 @Composable
 private fun HistoryScreen(history: List<HistoryItem>, onOpen: (HistoryItem) -> Unit, onDelete: (String) -> Unit) {
+    val st = LocalStrings.current
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 16.dp)
     ) {
         item {
-            Text("Geçmiş", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+            Text(st.history, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
             Spacer(Modifier.height(16.dp))
         }
         if (history.isEmpty()) {
-            item { Text("Geçmişte dosya yok.", color = Pal.Sub, fontSize = 14.sp) }
+            item { Text(st.noHistory, color = Pal.Sub, fontSize = 14.sp) }
         } else {
             items(history, key = { it.id }) { h ->
                 HistoryRow(h, onClick = { onOpen(h) }) {
                     Text(
-                        "Sil",
+                        st.deleteBtn,
                         color = Pal.Red,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp,
@@ -462,41 +511,71 @@ private fun HistoryScreen(history: List<HistoryItem>, onOpen: (HistoryItem) -> U
 private fun SettingsScreen(
     defLen: Length,
     historyCount: Int,
+    lang: AppLang,
+    onLang: (AppLang) -> Unit,
     onLength: (Length) -> Unit,
     onClear: () -> Unit,
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
+    val st = LocalStrings.current
+    val privacy by AdsGate.privacyRequired.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        TopBar("Ayarlar", onBack)
+        TopBar(st.settings, onBack)
         Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
-                Text("Varsayılan özet uzunluğu", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
+                Text(st.language, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
+                Spacer(Modifier.height(4.dp))
+                Text(st.languageDesc, fontSize = 13.sp, color = Pal.Sub)
+                Spacer(Modifier.height(12.dp))
+                AppLang.values().toList().chunked(2).forEach { pair ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        pair.forEach { l ->
+                            Choice(l.flag + " " + l.nativeName, l == lang, { onLang(l) }, Modifier.weight(1f))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (lang != AppLang.EN) Text(st.langPackHint, fontSize = 12.sp, color = Pal.Sub)
+            }
+            Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
+                Text(st.defaultLength, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Choice("Kısa", defLen == Length.SHORT, { onLength(Length.SHORT) }, Modifier.weight(1f))
-                    Choice("Orta", defLen == Length.MEDIUM, { onLength(Length.MEDIUM) }, Modifier.weight(1f))
-                    Choice("Uzun", defLen == Length.LONG, { onLength(Length.LONG) }, Modifier.weight(1f))
+                    Choice(st.lenShort, defLen == Length.SHORT, { onLength(Length.SHORT) }, Modifier.weight(1f))
+                    Choice(st.lenMedium, defLen == Length.MEDIUM, { onLength(Length.MEDIUM) }, Modifier.weight(1f))
+                    Choice(st.lenLong, defLen == Length.LONG, { onLength(Length.LONG) }, Modifier.weight(1f))
                 }
             }
             Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
-                Text("Geçmiş", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
+                Text(st.history, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
                 Spacer(Modifier.height(4.dp))
-                Text("Kayıtlı dosya sayısı: $historyCount", fontSize = 13.sp, color = Pal.Sub)
+                Text(st.savedCount.format(lang.num(historyCount)), fontSize = 13.sp, color = Pal.Sub)
                 Spacer(Modifier.height(12.dp))
-                SecondaryButton("Geçmişi temizle", {
+                SecondaryButton(st.clearHistory, {
                     onClear()
-                    Toast.makeText(ctx, "Geçmiş temizlendi", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, st.historyCleared, Toast.LENGTH_SHORT).show()
                 }, Modifier.fillMaxWidth())
             }
             Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
-                Text("Hakkında", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
+                Text(st.about, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Özetle 1.0. Özetleme telefonunda yapılır, dosyaların hiçbir yere gönderilmez.",
+                    st.aboutText.format(APP_VERSION),
                     fontSize = 13.sp,
                     color = Pal.Sub
                 )
+            }
+            if (privacy) {
+                Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
+                    Text(st.privacyOptions, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = Pal.Ink)
+                    Spacer(Modifier.height(4.dp))
+                    Text(st.privacyOptionsDesc, fontSize = 13.sp, color = Pal.Sub)
+                    Spacer(Modifier.height(12.dp))
+                    SecondaryButton(st.privacyOptions, {
+                        (ctx as? Activity)?.let { AdsGate.showPrivacyOptions(it) }
+                    }, Modifier.fillMaxWidth())
+                }
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -509,22 +588,24 @@ private fun SettingsScreen(
 private fun PasteScreen(onBack: () -> Unit, onSubmit: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     val enough = text.trim().length >= 150
+    val st = LocalStrings.current
+    val lang = LocalLang.current
     Column(Modifier.fillMaxSize()) {
-        TopBar("Metni yapıştır", onBack)
+        TopBar(st.pasteTitle, onBack)
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 8.dp)) {
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 shape = RoundedCornerShape(14.dp),
-                placeholder = { Text("Metni buraya yapıştır") }
+                placeholder = { Text(st.pastePlaceholder) }
             )
             Spacer(Modifier.height(8.dp))
             if (text.isNotEmpty() && !enough) {
-                Text("Özetlemek için en az 150 karakter gerekli.", fontSize = 13.sp, color = Pal.Sub)
+                Text(st.minChars.format(lang.num(150)), fontSize = 13.sp, color = Pal.Sub)
                 Spacer(Modifier.height(8.dp))
             }
-            PrimaryButton("Özetle", { onSubmit(text) }, Modifier.fillMaxWidth(), enabled = enough)
+            PrimaryButton(st.summarizeBtn, { onSubmit(text) }, Modifier.fillMaxWidth(), enabled = enough)
             Spacer(Modifier.height(8.dp))
         }
     }
@@ -539,23 +620,25 @@ private fun LoadingScreen() {
     ) {
         CircularProgressIndicator(color = Pal.Red)
         Spacer(Modifier.height(16.dp))
-        Text("Açılıyor", color = Pal.Sub)
+        Text(LocalStrings.current.opening, color = Pal.Sub)
     }
 }
 
 @Composable
 private fun WorkingScreen(s: UiState.Working) {
     val total = MainViewModel.WAIT
+    val st = LocalStrings.current
+    val lang = LocalLang.current
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Dosyan hazırlanıyor", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+        Text(st.preparing, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
         Spacer(Modifier.height(8.dp))
         Text(
-            if (s.ready) "Özet hazır. ${s.secondsLeft} sn sonra açılacak."
-            else "Metin okunuyor ve en önemli yerler seçiliyor. ${s.secondsLeft} sn",
+            if (s.ready) st.summaryReady.format(lang.num(s.secondsLeft))
+            else st.readingText.format(lang.num(s.secondsLeft)),
             textAlign = TextAlign.Center,
             color = Pal.Sub
         )
@@ -567,33 +650,34 @@ private fun WorkingScreen(s: UiState.Working) {
             trackColor = Pal.RedSoft
         )
         Spacer(Modifier.height(24.dp))
-        AdBox(AdSize.MEDIUM_RECTANGLE, R.string.admob_banner_id)
+        AdBox(AdSize.MEDIUM_RECTANGLE, R.string.admob_working_id)
     }
 }
 
 @Composable
-private fun ErrorScreen(message: String, onBack: () -> Unit) {
+private fun ErrorScreen(kind: Err, onBack: () -> Unit) {
+    val st = LocalStrings.current
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Özetlenemedi", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+        Text(st.errorTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
         Spacer(Modifier.height(8.dp))
-        Text(message, textAlign = TextAlign.Center, color = Pal.Sub)
+        Text(errText(kind, st), textAlign = TextAlign.Center, color = Pal.Sub)
         Spacer(Modifier.height(24.dp))
-        PrimaryButton("Geri dön", onBack, Modifier.fillMaxWidth())
+        PrimaryButton(st.goBack, onBack, Modifier.fillMaxWidth())
     }
 }
 
 // ---------------------------------------------------------------- sonuc
 
-private fun plainText(r: Result, title: String): String = buildString {
+private fun plainText(r: Result, title: String, st: Strings, lang: AppLang): String = buildString {
     appendLine(title)
     appendLine()
     for (sec in r.sections) {
         if (sec.items.isEmpty()) continue
-        sec.title?.let { appendLine(it.uppercase(Locale("tr", "TR"))) }
+        secTitle(sec, st)?.let { appendLine(it.uppercase(lang.locale)) }
         sec.items.forEachIndexed { i, t ->
             when (sec.kind) {
                 SectionKind.BULLETS -> appendLine("- $t")
@@ -606,7 +690,7 @@ private fun plainText(r: Result, title: String): String = buildString {
         }
         appendLine()
     }
-    if (r.keywords.isNotEmpty()) appendLine("Anahtar kelimeler: " + r.keywords.joinToString(", "))
+    if (r.keywords.isNotEmpty()) appendLine(st.keywords + ": " + r.keywords.joinToString(", "))
 }
 
 @Composable
@@ -618,7 +702,9 @@ private fun ResultScreen(
 ) {
     val ctx = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    val out = remember(s.result, s.fileName) { plainText(s.result, s.fileName) }
+    val st = LocalStrings.current
+    val lang = LocalLang.current
+    val out = remember(s.result, s.fileName, lang) { plainText(s.result, s.fileName, st, lang) }
     val r = s.result
 
     Column(Modifier.fillMaxSize()) {
@@ -631,23 +717,25 @@ private fun ResultScreen(
             item {
                 val kind = when {
                     s.mode != Mode.AUTO -> ""
-                    r.mode == Mode.STORY -> "Algılanan tür: hikaye / kitap. "
-                    else -> "Algılanan tür: ders / sınav notu. "
+                    r.mode == Mode.STORY -> st.detectedStory + " "
+                    else -> st.detectedExam + " "
                 }
-                Text(kind + "${r.wordCount} kelime tarandı.", fontSize = 13.sp, color = Pal.Sub)
+                Text(kind + st.wordsScanned.format(lang.num(r.wordCount)), fontSize = 13.sp, color = Pal.Sub)
+                if (r.translated) Text(st.translatedNote, fontSize = 12.sp, color = Pal.Sub)
+                if (r.translateFailed) Text(st.translateFail, fontSize = 12.sp, color = Pal.Sub)
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Choice("Otomatik", s.mode == Mode.AUTO, { onMode(Mode.AUTO) }, Modifier.weight(1f))
-                    Choice("Ders / sınav", s.mode == Mode.EXAM, { onMode(Mode.EXAM) }, Modifier.weight(1f))
-                    Choice("Hikaye / kitap", s.mode == Mode.STORY, { onMode(Mode.STORY) }, Modifier.weight(1f))
+                    Choice(st.modeAuto, s.mode == Mode.AUTO, { onMode(Mode.AUTO) }, Modifier.weight(1f))
+                    Choice(st.modeExam, s.mode == Mode.EXAM, { onMode(Mode.EXAM) }, Modifier.weight(1f))
+                    Choice(st.modeStory, s.mode == Mode.STORY, { onMode(Mode.STORY) }, Modifier.weight(1f))
                 }
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Choice("Kısa", s.length == Length.SHORT, { onLength(Length.SHORT) }, Modifier.weight(1f))
-                    Choice("Orta", s.length == Length.MEDIUM, { onLength(Length.MEDIUM) }, Modifier.weight(1f))
-                    Choice("Uzun", s.length == Length.LONG, { onLength(Length.LONG) }, Modifier.weight(1f))
+                    Choice(st.lenShort, s.length == Length.SHORT, { onLength(Length.SHORT) }, Modifier.weight(1f))
+                    Choice(st.lenMedium, s.length == Length.MEDIUM, { onLength(Length.MEDIUM) }, Modifier.weight(1f))
+                    Choice(st.lenLong, s.length == Length.LONG, { onLength(Length.LONG) }, Modifier.weight(1f))
                 }
             }
             items(r.sections.filter { it.items.isNotEmpty() }) { sec ->
@@ -655,7 +743,7 @@ private fun ResultScreen(
                     Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    sec.title?.let {
+                    secTitle(sec, st)?.let {
                         Text(it, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Pal.Red)
                     }
                     sec.items.forEachIndexed { i, t ->
@@ -677,7 +765,7 @@ private fun ResultScreen(
             if (r.keywords.isNotEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().clip(R16).background(Color.White).border(1.dp, Pal.Line, R16).padding(16.dp)) {
-                        Text("Anahtar kelimeler", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Pal.Red)
+                        Text(st.keywords, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Pal.Red)
                         Spacer(Modifier.height(6.dp))
                         Text(r.keywords.joinToString(", "), fontSize = 15.sp, color = Pal.Ink)
                     }
@@ -685,18 +773,18 @@ private fun ResultScreen(
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SecondaryButton("Kopyala", {
+                    SecondaryButton(st.copyBtn, {
                         clipboard.setText(AnnotatedString(out))
-                        Toast.makeText(ctx, "Kopyalandı", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, st.copied, Toast.LENGTH_SHORT).show()
                     }, Modifier.weight(1f))
-                    SecondaryButton("Paylaş", {
+                    SecondaryButton(st.shareBtn, {
                         val send = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, out)
                         }
-                        ctx.startActivity(Intent.createChooser(send, "Paylaş"))
+                        ctx.startActivity(Intent.createChooser(send, st.shareBtn))
                     }, Modifier.weight(1f))
-                    PrimaryButton("Yeni", onNew, Modifier.weight(1f))
+                    PrimaryButton(st.newBtn, onNew, Modifier.weight(1f))
                 }
             }
         }
