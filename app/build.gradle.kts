@@ -42,5 +42,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.google.android.gms:play-services-ads:23.2.0")
+    implementation("com.google.android.ump:user-messaging-platform:2.2.0")
+    implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }
