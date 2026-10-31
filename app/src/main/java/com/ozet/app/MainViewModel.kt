@@ -9,11 +9,15 @@ import com.ozet.app.data.HistoryItem
 import com.ozet.app.data.HistoryStore
 import com.ozet.app.data.sizeOf
 import com.ozet.app.data.typeOf
+import com.ozet.app.engine.AppError
+import com.ozet.app.engine.Err
 import com.ozet.app.engine.Extractor
 import com.ozet.app.engine.Length
 import com.ozet.app.engine.Mode
 import com.ozet.app.engine.Result
 import com.ozet.app.engine.Summarizer
+import com.ozet.app.engine.Translate
+import com.ozet.app.i18n.AppLang
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -32,7 +36,7 @@ sealed interface UiState {
     data object Loading : UiState
     data class Working(val secondsLeft: Int, val ready: Boolean) : UiState
     data class Done(val result: Result, val mode: Mode, val length: Length, val fileName: String) : UiState
-    data class Error(val message: String) : UiState
+    data class Error(val kind: Err) : UiState
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -53,6 +57,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _defaultLength = MutableStateFlow(readLength())
     val defaultLength: StateFlow<Length> = _defaultLength.asStateFlow()
 
+    // Seçilen dil kalıcıdır; uygulama yeniden açılınca son seçilen dil kullanılır.
+    private val _lang = MutableStateFlow(AppLang.fromCode(settings.getString("lang", null)))
+    val lang: StateFlow<AppLang> = _lang.asStateFlow()
+
     private var text = ""
     private var name = ""
     private var mode = Mode.AUTO
@@ -63,6 +71,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         Length.valueOf(settings.getString("length", "MEDIUM") ?: "MEDIUM")
     } catch (e: Exception) {
         Length.MEDIUM
+    }
+
+    fun setLang(l: AppLang) {
+        settings.edit().putString("lang", l.code).apply()
+        _lang.value = l
+        Translate.prefetch(l.code)
     }
 
     fun goHome() {
@@ -97,16 +111,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _history.value = store.clear()
     }
 
+    /** Özeti çıkarır, gerekirse seçili dile çevirir. */
+    private suspend fun build(t: String, m: Mode, l: Length): Result {
+        val code = _lang.value.code
+        val res = withContext(Dispatchers.Default) { Summarizer.summarize(t, m, l) }
+        return Translate.translate(res, code)
+    }
+
     fun openUri(uri: Uri) {
         val ctx = getApplication<Application>()
-        val n = Extractor.displayName(ctx, uri)
+        val n = Extractor.displayName(ctx, uri, _lang.value.strings.fileFallback)
         start(n, typeOf(n), sizeOf(ctx, uri)) { Extractor.extract(ctx, uri) }
     }
 
     fun submitText(pasted: String) {
         val first = pasted.trim().lineSequence().firstOrNull()?.trim().orEmpty()
         val label = if (first.length > 32) first.substring(0, 32) + "…" else first
-        start(label.ifEmpty { "Yapıştırılan metin" }, "METIN", pasted.toByteArray().size.toLong()) { pasted }
+        start(label.ifEmpty { _lang.value.strings.pastedText }, "METIN", pasted.toByteArray().size.toLong()) { pasted }
     }
 
     fun openHistory(item: HistoryItem) {
@@ -115,18 +136,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         mode = Mode.AUTO
         _state.value = UiState.Loading
         job = viewModelScope.launch {
-            val r = withContext(Dispatchers.Default) {
-                runCatching {
-                    val t = withContext(Dispatchers.IO) { store.readText(item.id) }
-                        ?: error("Bu dosyanın kaydı bulunamadı.")
-                    Pair(t, Summarizer.summarize(t, mode, length))
-                }
+            val r = runCatching {
+                val t = withContext(Dispatchers.IO) { store.readText(item.id) } ?: throw AppError(Err.NOT_FOUND)
+                Pair(t, build(t, mode, length))
             }
             r.onSuccess { p ->
                 text = p.first
                 _state.value = UiState.Done(p.second, mode, length, name)
             }.onFailure { e ->
-                _state.value = UiState.Error(e.message ?: "Dosya açılamadı.")
+                _state.value = UiState.Error((e as? AppError)?.kind ?: Err.OPEN)
             }
         }
     }
@@ -141,14 +159,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         mode = Mode.AUTO
         _state.value = UiState.Working(WAIT, false)
         job = viewModelScope.launch {
-            val work = async(Dispatchers.Default) {
+            val work = async {
                 runCatching {
-                    val t = load()
-                    if (t.isBlank()) {
-                        error("Dosyada okunabilir metin bulunamadı. Taranmış (resim) bir PDF olabilir.")
-                    }
-                    val res = Summarizer.summarize(t, mode, length)
-                    if (res.sentenceCount == 0) error("Özetlenecek kadar metin bulunamadı.")
+                    val t = withContext(Dispatchers.IO) { load() }
+                    if (t.isBlank()) throw AppError(Err.NO_TEXT)
+                    val res = build(t, mode, length)
+                    if (res.sentenceCount == 0) throw AppError(Err.TOO_SHORT)
                     Pair(t, res)
                 }
             }
@@ -164,7 +180,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _history.value = saved
                 _state.value = UiState.Done(pair.second, mode, length, name)
             }.onFailure { e ->
-                _state.value = UiState.Error(e.message ?: "Dosya okunamadı.")
+                _state.value = UiState.Error((e as? AppError)?.kind ?: Err.READ)
             }
         }
     }
@@ -175,7 +191,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         length = l
         job?.cancel()
         job = viewModelScope.launch {
-            val res = withContext(Dispatchers.Default) { Summarizer.summarize(text, m, l) }
+            val res = build(text, m, l)
             _state.value = UiState.Done(res, m, l, name)
         }
     }

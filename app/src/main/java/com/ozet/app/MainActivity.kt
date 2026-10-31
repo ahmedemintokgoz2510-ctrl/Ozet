@@ -4,7 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import com.google.android.gms.ads.MobileAds
+import com.ozet.app.ui.AdsGate
 import com.ozet.app.ui.App
 import com.ozet.app.ui.OzetTheme
 
@@ -13,7 +13,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        MobileAds.initialize(this) {}
+        AdsGate.start(this)
         setContent {
             OzetTheme { App(vm) }
         }
