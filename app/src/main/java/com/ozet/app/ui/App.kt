@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -187,7 +188,8 @@ fun App(vm: MainViewModel) {
                 )
                 is UiState.Paste -> PasteScreen(onBack = vm::goHome, onSubmit = vm::submitText)
                 is UiState.Loading -> LoadingScreen()
-                is UiState.Working -> WorkingScreen(s)
+                is UiState.Working -> WorkingScreen()
+                is UiState.Reward -> RewardScreen(vm::unlock, vm::goHome)
                 is UiState.Done -> ResultScreen(s, vm::setMode, vm::setLength, vm::goHome)
                 is UiState.Error -> ErrorScreen(s.kind, vm::goHome)
             }
@@ -625,10 +627,8 @@ private fun LoadingScreen() {
 }
 
 @Composable
-private fun WorkingScreen(s: UiState.Working) {
-    val total = MainViewModel.WAIT
+private fun WorkingScreen() {
     val st = LocalStrings.current
-    val lang = LocalLang.current
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -636,21 +636,51 @@ private fun WorkingScreen(s: UiState.Working) {
     ) {
         Text(st.preparing, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
         Spacer(Modifier.height(8.dp))
-        Text(
-            if (s.ready) st.summaryReady.format(lang.num(s.secondsLeft))
-            else st.readingText.format(lang.num(s.secondsLeft)),
-            textAlign = TextAlign.Center,
-            color = Pal.Sub
-        )
+        Text(st.workingText, textAlign = TextAlign.Center, color = Pal.Sub)
         Spacer(Modifier.height(20.dp))
         LinearProgressIndicator(
-            progress = { (total - s.secondsLeft + 1f) / total },
             modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
             color = Pal.Red,
             trackColor = Pal.RedSoft
         )
         Spacer(Modifier.height(24.dp))
         AdBox(AdSize.MEDIUM_RECTANGLE, R.string.admob_working_id)
+    }
+}
+
+@Composable
+private fun RewardScreen(onUnlock: () -> Unit, onBack: () -> Unit) {
+    val st = LocalStrings.current
+    val ctx = LocalContext.current
+    val ready by AdsGate.ready.collectAsStateWithLifecycle()
+    val status by RewardedGate.status.collectAsStateWithLifecycle()
+    LaunchedEffect(ready) { RewardedGate.load(ctx) }
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(st.rewardTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Pal.Ink)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            if (status == 3) st.rewardFailed else st.rewardDesc,
+            textAlign = TextAlign.Center,
+            color = Pal.Sub
+        )
+        Spacer(Modifier.height(24.dp))
+        when (status) {
+            2 -> PrimaryButton(st.rewardWatch, {
+                (ctx as? Activity)?.let { act -> RewardedGate.show(act, onUnlock) }
+            }, Modifier.fillMaxWidth())
+            3 -> PrimaryButton(st.rewardRetry, { RewardedGate.load(ctx) }, Modifier.fillMaxWidth())
+            else -> {
+                CircularProgressIndicator(color = Pal.Red)
+                Spacer(Modifier.height(12.dp))
+                Text(st.rewardLoading, color = Pal.Sub)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton(st.goBack, onBack, Modifier.fillMaxWidth())
     }
 }
 

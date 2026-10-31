@@ -15,7 +15,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.android.gms.ads.AdError
 import com.google.android.gms.ads.AdListener
+import com.google.android.gms.ads.FullScreenContentCallback
+import com.google.android.gms.ads.OnUserEarnedRewardListener
+import com.google.android.gms.ads.rewarded.RewardedAd
+import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
+import com.ozet.app.R
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
@@ -120,4 +126,57 @@ fun AdBox(bannerSize: AdSize, unitIdRes: Int, modifier: Modifier = Modifier) {
         factory = { adView },
         modifier = modifier.semantics { contentDescription = adLabel }
     )
+}
+
+/**
+ * Ödüllü reklam: özet hazır olunca kullanıcı reklamı izler, izleme tamamlanınca özet açılır.
+ * Durum: 0 boşta, 1 yükleniyor, 2 hazır, 3 yüklenemedi / gösterilemedi.
+ */
+object RewardedGate {
+    private val _status = MutableStateFlow(0)
+    val status: StateFlow<Int> = _status.asStateFlow()
+    private var ad: RewardedAd? = null
+
+    fun load(context: Context) {
+        if (!AdsGate.ready.value || _status.value == 1 || _status.value == 2) return
+        _status.value = 1
+        try {
+            RewardedAd.load(
+                context.applicationContext,
+                context.getString(R.string.admob_rewarded_id),
+                AdRequest.Builder().build(),
+                object : RewardedAdLoadCallback() {
+                    override fun onAdLoaded(loaded: RewardedAd) {
+                        ad = loaded
+                        _status.value = 2
+                    }
+
+                    override fun onAdFailedToLoad(error: LoadAdError) {
+                        ad = null
+                        _status.value = 3
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            _status.value = 3
+        }
+    }
+
+    fun show(activity: Activity, onReward: () -> Unit) {
+        val a = ad ?: return
+        var rewarded = false
+        a.fullScreenContentCallback = object : FullScreenContentCallback() {
+            override fun onAdDismissedFullScreenContent() {
+                ad = null
+                _status.value = 0
+                if (rewarded) onReward()
+            }
+
+            override fun onAdFailedToShowFullScreenContent(error: AdError) {
+                ad = null
+                _status.value = 3
+            }
+        }
+        a.show(activity, OnUserEarnedRewardListener { rewarded = true })
+    }
 }
