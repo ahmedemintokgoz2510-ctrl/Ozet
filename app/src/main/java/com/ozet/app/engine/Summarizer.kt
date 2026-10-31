@@ -33,7 +33,9 @@ data class Result(
     val wordCount: Int,
     val srcLang: String = "und",
     val translated: Boolean = false,
-    val translateFailed: Boolean = false
+    val translateFailed: Boolean = false,
+    /** Otomatik kalite kontrolün iç notları (arayüzde gösterilmesi zorunlu değil; test/raporlama içindir). */
+    val qualityNotes: List<String> = emptyList()
 )
 
 private class Sent(
@@ -58,6 +60,8 @@ private class Sent(
     var isCompare = false
     var isExample = false
     var isConc = false
+    var isExc = false
+    var hasFormula = false
     var hasDate = false
     var hasPct = false
     var hasNum = false
@@ -79,18 +83,30 @@ private class Kw(
     var score: Double
 )
 
+private class ExamOut(val sections: List<Section>, val chosen: Set<Sent>, val notes: List<String>)
+
 /**
  * Yerel, yapay zekasız (API'siz) özetleyici. Belgenin dili otomatik algılanır (TR/EN/DE/ES/FR/AR).
  *
- * Akış: ayrıştırma -> özellik çıkarma (tarih, sayı, isim, tanım, sınıflandırma, neden-sonuç, karşılaştırma...)
+ * Akış: temizleme + ayrıştırma (PDF kalıntıları, sayfa sonu bölünmeleri, tablo satırları)
+ * -> özellik çıkarma (tarih, sayı, formül, isim, tanım, sınıflandırma, neden-sonuç, karşılaştırma, istisna...)
  * -> puanlama (TF-IDF + TextRank + bu özellikler) -> yapı korumalı seçim (her başlık, her madde, her sınıf üyesi)
- * -> doğrulama/onarım (kaybolan başlık, tarih, sayı, tanım, sınıflandırma) -> anahtar kelime seçimi.
- * Özet çıkarımsaldır: metne cümle eklemez, yalnızca orijinal cümleleri seçer.
+ * -> doğrulama/onarım (kaybolan başlık, tarih, sayı, tanım, sınıflandırma, istisna, sonuç)
+ * -> son kalite kontrol (tekrar temizliği, kapsam raporu) -> anahtar kelime seçimi.
+ * Özet çıkarımsaldır: metne cümle eklemez, yalnızca orijinal cümleleri seçer; bu yüzden tarih, sayı ve isimler değişmez.
  */
 object Summarizer {
+    private const val SENT_END = ".!?…:\"”؟»;"
+
     private val WORD = Regex("\\p{L}+")
     private val WS = Regex("\\s+")
     private val PAGE_NUM = Regex("\\d{1,4}")
+    private val PAGE_LABEL = Regex(
+        "^(?:[-–—]\\s*\\d{1,4}\\s*[-–—]|(?:sayfa|page|seite|página|pagina|p\\.|ص|صفحة)\\s*\\d{1,4}(?:\\s*(?:/|of|von|de)\\s*\\d{1,4})?|\\d{1,4}\\s*/\\s*\\d{1,4})$",
+        RegexOption.IGNORE_CASE
+    )
+    private val JUNK_CHARS = Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\uFFFD\\u200B\\uFEFF]")
+    private val LIGATURES = listOf("ﬁ" to "fi", "ﬂ" to "fl", "ﬀ" to "ff", "ﬃ" to "ffi", "ﬄ" to "ffl")
     private val MULTI_SPACE = Regex(" {2,}")
     private val HYPHEN_BREAK = Regex("(\\p{L})-\\n(\\p{L})")
     private val BULLET = Regex("^([•●▪◦■□▫‣⁃*]|-|\\d{1,2}[.)]|[a-zA-Z][.)])\\s+\\S.*")
@@ -100,6 +116,15 @@ object Summarizer {
     private val NUM = Regex("\\d+(?:[.,]\\d+)*")
     private val YEAR = Regex("(?<!\\d)(1[0-9]{3}|20[0-9]{2})(?!\\d)")
     private val ACRO = Regex("(?<![\\p{L}\\d])\\p{Lu}{2,}[\\p{Lu}\\d]*(?![\\p{L}])")
+    private val FORMULA = Regex("[\\p{L}\\d)\\]]\\s?(?:=|≈|≤|≥|≠)\\s?[\\p{L}\\d(\\[√−\\-]|[√∑∫±×÷]")
+    private val EXC = Regex(
+        "istisna|hariç|dışında|şartıyla|koşuluyla|aksi halde|aksi takdirde|olmadıkça|" +
+            "except|unless|provided that|exception|" +
+            "ausnahme|außer|sofern|es sei denn|" +
+            "excepto|salvo|a menos que|excepción|" +
+            "sauf|excepté|à moins que|" +
+            "إلا |باستثناء|ما لم|استثناء"
+    )
     private val TR_COPULA = Regex("^(?:[^,]{2,45},[^.]{10,170}|\\p{Lu}[^.,]{8,140})\\p{L}+(d[ıiuü]r|t[ıiuü]r)[.!]?$")
     private val TR_COP_END = Regex("^\\p{L}{5,}(d[ıiuü]r|t[ıiuü]r)$")
     private val TR_CASE_END = Regex("^\\p{L}{4,}(de|da|den|dan|nin|nın|nun|nün|yle|yla)$")
@@ -129,7 +154,10 @@ object Summarizer {
             Result(mode, sec.first, finalKeywords(cands, chosen, sents, pack), sents.size, wordCount, srcLang)
         } else {
             val ex = examSections(sents, length, pack, cands)
-            Result(mode, ex.first, finalKeywords(cands, ex.second, sents, pack), sents.size, wordCount, srcLang)
+            Result(
+                mode, ex.sections, finalKeywords(cands, ex.chosen, sents, pack), sents.size, wordCount, srcLang,
+                qualityNotes = ex.notes
+            )
         }
     }
 
@@ -138,14 +166,16 @@ object Summarizer {
     private fun parse(raw: String, pack: LangPack): List<Sent> {
         var text = raw.replace("\r\n", "\n").replace('\r', '\n')
             .replace("\u00AD", "").replace('\u00A0', ' ').replace('\t', ' ')
+        text = text.replace(JUNK_CHARS, "")
+        for ((k, v) in LIGATURES) text = text.replace(k, v)
         text = text.replace(HYPHEN_BREAK, "\$1\$2")
         val rawLines = text.split('\n').map { it.trim().replace(MULTI_SPACE, " ") }
 
         val freq = HashMap<String, Int>()
         for (l in rawLines) if (l.length in 6..80) freq[l] = (freq[l] ?: 0) + 1
         val lines = rawLines.filter { l ->
-            val pageNum = PAGE_NUM.matches(l)
-            val repeated = l.length in 6..80 && (freq[l] ?: 0) >= 4 && !isDialogueStart(l) && !isBullet(l)
+            val pageNum = PAGE_NUM.matches(l) || PAGE_LABEL.matches(l)
+            val repeated = l.length in 6..80 && (freq[l] ?: 0) >= 4 && !isDialogueStart(l) && !isBullet(l) && !isTableRow(l)
             !(pageNum || repeated)
         }
 
@@ -160,7 +190,7 @@ object Summarizer {
             for (p in parts) {
                 val t = p.trim()
                 val words = t.count { it == ' ' } + 1
-                if (t.length < (if (bullet) 12 else 25) || words < (if (bullet) 2 else 4)) continue
+                if (t.length < (if (bullet) 12 else 25) || words < (if (bullet) 2 else 3)) continue
                 val st = stems(t, pack)
                 if (st.size < 2) continue
                 out.add(Sent(out.size, t, st, st.toHashSet(), heading, bullet, dialogue, first, pack.lower(t), para))
@@ -176,16 +206,34 @@ object Summarizer {
         }
 
         var prevBlank = true
+        var softBreak = false
         for (line in lines) {
             if (line.isEmpty()) {
-                flush(); prevBlank = true; para++; continue
+                // Cümle bitmeden gelen tek boş satır (PDF sayfa sonu) hemen paragraf bitirmez
+                if (buf.isNotEmpty() && !softBreak && buf.last() !in SENT_END) {
+                    softBreak = true
+                } else {
+                    flush(); softBreak = false; para++
+                }
+                prevBlank = true
+                continue
+            }
+            if (softBreak) {
+                softBreak = false
+                val cont = line[0].isLowerCase() && !isBullet(line) && !isDialogueStart(line) && !isTableRow(line)
+                if (cont) {
+                    prevBlank = false
+                } else {
+                    flush(); para++
+                }
             }
             if (line.startsWith("# ")) {
                 flush(); heading = cleanHeading(line.substring(2), pack); para++; prevBlank = false; continue
             }
-            val canStart = prevBlank || buf.isEmpty() || buf.last() in ".!?…:\"”؟"
+            val canStart = prevBlank || buf.isEmpty() || buf.last() in SENT_END
             when {
                 isDialogueStart(line) -> { flush(); addUnit(line, false, true) }
+                isTableRow(line) -> { flush(); addUnit(tableRowText(line), true, false) }
                 isBullet(line) -> { flush(); addUnit(line.replaceFirst(BULLET_MARK, ""), true, false) }
                 isHeading(line, canStart, pack) -> { flush(); heading = cleanHeading(line, pack); para++ }
                 else -> {
@@ -198,6 +246,11 @@ object Summarizer {
         flush()
         return out
     }
+
+    private fun isTableRow(line: String): Boolean = line.count { it == '|' } >= 2
+
+    private fun tableRowText(line: String): String =
+        line.split('|').map { it.trim() }.filter { it.isNotEmpty() }.joinToString("; ")
 
     private fun isDialogueStart(line: String): Boolean {
         if (line.startsWith("—") || line.startsWith("–") || line.startsWith("“") ||
@@ -307,7 +360,7 @@ object Summarizer {
 
     // ------------------------------------------------------------------ ozellik cikarma
 
-    /** Cümledeki tarih, sayı, yüzde, kurum/kişi adı, kısaltma ve tanım/sınıflandırma/neden-sonuç/karşılaştırma ipuçları. */
+    /** Cümledeki tarih, sayı, yüzde, formül, kurum/kişi adı, kısaltma ve tanım/sınıflandırma/neden-sonuç/karşılaştırma/istisna ipuçları. */
     private fun analyze(s: Sent, pack: LangPack) {
         val f = HashSet<String>()
         val pct = PCT.containsMatchIn(s.lower)
@@ -323,6 +376,9 @@ object Summarizer {
         s.hasNum = anyNum
         s.hasPct = pct && anyNum
         s.hasDate = year || (anyNum && pack.months.containsMatchIn(s.lower))
+        val fm = FORMULA.find(s.text)
+        s.hasFormula = fm != null
+        if (fm != null) f.add("f:" + fm.value.replace(" ", ""))
         var acr = 0
         for (m in ACRO.findAll(s.text)) {
             if (m.value.length <= 8) { f.add("a:" + m.value); acr++ }
@@ -351,6 +407,7 @@ object Summarizer {
         s.isCompare = pack.compare.containsMatchIn(s.lower)
         s.isExample = pack.example.containsMatchIn(s.lower)
         s.isConc = pack.conclusion.containsMatchIn(s.lower)
+        s.isExc = EXC.containsMatchIn(s.lower)
     }
 
     private fun announced(s: Sent, pack: LangPack): Int {
@@ -516,13 +573,24 @@ object Summarizer {
         return false
     }
 
+    private fun cutPoint(t: String, limit: Int): Int {
+        if (t.length <= limit) return t.length
+        var cut = max(t.lastIndexOf("; ", limit), t.lastIndexOf(", ", limit))
+        if (cut < limit * 0.6) cut = t.lastIndexOf(' ', limit - 3)
+        if (cut < limit * 0.5) cut = limit - 3
+        return cut
+    }
+
+    /** Uzun cümleyi kısaltır; ama kısaltılan kuyrukta sayı/tarih/formül varsa kesmez (bilgi kaybı önlenir). */
     private fun display(s: Sent): String {
         val t = s.text.replace(WS, " ").trim()
         val limit = if (s.member || s.isClass || s.facts.size >= 3) 560 else 400
         if (t.length <= limit) return t
-        var cut = max(t.lastIndexOf("; ", limit), t.lastIndexOf(", ", limit))
-        if (cut < limit * 0.6) cut = t.lastIndexOf(' ', limit - 3)
-        if (cut < limit * 0.5) cut = limit - 3
+        var cut = cutPoint(t, limit)
+        if (t.substring(cut).any { it.isDigit() } || FORMULA.containsMatchIn(t.substring(cut))) {
+            cut = cutPoint(t, 900)
+        }
+        if (cut >= t.length) return t
         return t.substring(0, cut).trimEnd(',', ';', ' ') + "…"
     }
 
@@ -672,7 +740,7 @@ object Summarizer {
 
     // ------------------------------------------------------------------ sinav / ders notu
 
-    private fun examSections(sents: List<Sent>, length: Length, pack: LangPack, cands: List<Kw>): Pair<List<Section>, Set<Sent>> {
+    private fun examSections(sents: List<Sent>, length: Length, pack: LangPack, cands: List<Kw>): ExamOut {
         val timeline = sents.size >= 8 && sents.count { it.hasDate }.toDouble() / sents.size >= 0.35
         for (s in sents) {
             var v = 0.45 * s.base + 0.45 * s.rank
@@ -682,6 +750,8 @@ object Summarizer {
             if (s.isCause) v += 0.12
             if (s.isCompare) v += 0.12
             if (s.isConc) v += 0.22
+            if (s.isExc) v += 0.10
+            if (s.hasFormula) v += 0.14
             if (s.isExample && s.facts.isNotEmpty()) v += 0.05
             v += 0.05 * min(s.facts.size, 4)
             if (s.hasDate) v += if (timeline) 0.24 else 0.08
@@ -702,10 +772,19 @@ object Summarizer {
         val groups = buildGroups(sents, cands)
         for ((gi, g) in groups.withIndex()) for (s in g.members) s.seg = gi
         val chosen = LinkedHashSet<Sent>()
+        val notes = ArrayList<String>()
         var words = 0
         fun add(s: Sent): Boolean {
             if (chosen.add(s)) { words += s.words; return true }
             return false
+        }
+
+        // Ön hesap: sınıflandırma üyeleri ve madde listeleri (büyük belgelerde hızlı erişim için)
+        val byHead = HashMap<Int, MutableList<Sent>>()
+        val byRun = HashMap<Int, MutableList<Sent>>()
+        for (s in sents) {
+            if (s.head >= 0) byHead.getOrPut(s.head) { ArrayList() }.add(s)
+            if (s.run >= 0) byRun.getOrPut(s.run) { ArrayList() }.add(s)
         }
 
         val headStemSets = HashMap<String, Set<String>>()
@@ -756,14 +835,12 @@ object Summarizer {
             val snapshot = chosen.toList()
             for (s in snapshot) {
                 if (s.isClass && !s.bullet) {
-                    var cnt = 0
-                    for (t in sents) {
-                        if (t.head == s.idx && cnt < 8) { cnt++; if (add(t)) changed = true }
-                    }
+                    val lst = byHead[s.idx]
+                    if (lst != null) for (t in lst.take(8)) if (add(t)) changed = true
                 }
                 if (s.head >= 0 && add(sents[s.head])) changed = true
                 if (s.run >= 0) {
-                    val mates = sents.filter { it.run == s.run }
+                    val mates: List<Sent> = byRun[s.run] ?: emptyList()
                     val keep = if (mates.size <= max(runCap, 8)) mates else (mates.filter { it in chosen } + mates.sortedByDescending { it.score }).distinct().take(runCap)
                     for (t in keep) if (add(t)) changed = true
                 }
@@ -801,11 +878,11 @@ object Summarizer {
             }
         }
 
-        // 5) Doğrulama: önemli tarih / sayı / yüzde / isim kaybolmasın
+        // 5) Doğrulama: önemli tarih / sayı / yüzde / formül / isim kaybolmasın
         val sorted = sents.map { it.score }.sorted()
         val thr = sorted[(sorted.size * 0.6).toInt().coerceIn(0, sorted.size - 1)]
         val keyFacts = HashSet<String>()
-        for (s in sents) if (s.hasDate || s.hasPct || s.score >= thr) keyFacts.addAll(s.facts)
+        for (s in sents) if (s.hasDate || s.hasPct || s.hasFormula || s.score >= thr) keyFacts.addAll(s.facts)
         if (keyFacts.isNotEmpty()) {
             val covered = HashSet<String>()
             for (s in chosen) covered.addAll(s.facts)
@@ -853,12 +930,27 @@ object Summarizer {
             }
         }
 
+        // 6b) Koşul / istisna: seçilen cümlenin hemen ardından gelen istisna cümlesi ("... hariç", "unless ...") kaybolmasın
+        run {
+            var cap = max(2, target / 5)
+            for (s in chosen.toList().sortedBy { it.idx }) {
+                if (cap <= 0) break
+                if (s.idx + 1 >= n) continue
+                val nx = sents[s.idx + 1]
+                if (nx.isExc && nx !in chosen && nx.para == s.para && nx.heading == s.heading && !nx.dialogue) {
+                    add(nx); cap--
+                    notes.add("istisna-eklendi:" + nx.idx)
+                }
+            }
+        }
+
         // 7) Hiçbir başlık / konu içeriksiz kalmasın
         if (groups.size > 1) {
             for (g in orderedGroups) {
                 if (g.members.none { it in chosen }) {
                     val best = g.members.maxByOrNull { it.score } ?: continue
                     add(best)
+                    notes.add("bos-baslik-onarildi:" + (g.title ?: "-"))
                 }
             }
         }
@@ -890,13 +982,57 @@ object Summarizer {
             }
         }
 
+        // 8) Sonuç cümlesi: metnin son bölümünde açık bir sonuç varsa özet onu taşısın
+        if (n >= 6 && chosen.none { it.isConc }) {
+            val tailStart = (n * 0.75).toInt()
+            val concl = sents.drop(tailStart).filter { it.isConc && !it.dialogue }.maxByOrNull { it.score }
+            if (concl != null && !redundant(concl, chosen)) {
+                add(concl)
+                notes.add("sonuc-eklendi:" + concl.idx)
+            }
+        }
+
+        // 9) Uzun belgelerde ilk / orta / son bölüm dengeli temsil edilsin
+        if (n >= 60) {
+            val minThird = max(1, (target * 0.18).toInt())
+            for (part in 0 until 3) {
+                val from = part * n / 3
+                val to = (part + 1) * n / 3
+                var have = (from until to).count { sents[it] in chosen }
+                if (have >= minThird) continue
+                for (s in sents.subList(from, to).sortedByDescending { it.score }) {
+                    if (have >= minThird) break
+                    if (s in chosen || s.dialogue || redundant(s, chosen)) continue
+                    add(s); have++
+                }
+                notes.add("denge-onarildi:bolum" + (part + 1))
+            }
+        }
+
+        // 10) Son kalite kontrol: aynı bölümdeki neredeyse aynı cümleleri temizle, kapsam raporu çıkar
+        run {
+            val kept = ArrayList<Sent>()
+            for (s in chosen.sortedBy { it.idx }) {
+                val dup = !s.member && s.head < 0 && !s.isClass && kept.any { k ->
+                    k.seg == s.seg && jaccard(k.stemSet, s.stemSet) > 0.9 && s.facts.all { it in k.facts }
+                }
+                if (dup) { chosen.remove(s); notes.add("tekrar-temizlendi:" + s.idx) } else kept.add(s)
+            }
+            val cov = HashSet<String>()
+            for (s in chosen) cov.addAll(s.facts)
+            if (keyFacts.isNotEmpty()) {
+                notes.add("olgu-kapsami=%" + (100 * keyFacts.count { it in cov } / keyFacts.size))
+            }
+            notes.add("cumle=" + chosen.size + "/" + n)
+        }
+
         val byGroup = LinkedHashMap<Int, MutableList<Sent>>()
         for (s in chosen.sortedBy { it.idx }) byGroup.getOrPut(s.seg) { ArrayList() }.add(s)
         val sections = byGroup.map { (gi, list) ->
             val g = groups[gi]
             Section(g.title, list.map { display(it) }, SectionKind.BULLETS, g.skey)
         }
-        return Pair(sections, chosen)
+        return ExamOut(sections, chosen, notes)
     }
 
     // ------------------------------------------------------------------ hikaye / kitap
@@ -1204,6 +1340,6 @@ object Summarizer {
             if (picked.any { it.stems.containsAll(k.stems) }) continue
             picked.add(k)
         }
-        return picked.map { it.surface }.distinct()
+        return picked.map { it.surface }.distinctBy { it.lowercase(pack.locale) }
     }
 }
