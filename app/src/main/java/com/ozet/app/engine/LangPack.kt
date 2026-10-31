@@ -74,7 +74,9 @@ object Langs {
             """yeni çalışan belirli farklı önemli kullanılan kullanım günümüzde örnek genel çeşitli bazen gerekir mümkün
             sürekli özellikle gerçek doğru yüksek düşük ilk son iki üç dört beş durum konu hale yer yıl gün kişi şekilde şekil
             yoluyla sayesinde yaklaşık civarı genel giriş sonuç özet türleri türü olarak ortaya çıkan yapılması edilmesi kullanılır kullanılarak sağlar sağlayan gösterir bulunmaktadır
-            bulunuyor içerisinde birlikte tarafı halde açıdan yönde"""),
+            bulunuyor içerisinde birlikte tarafı halde açıdan yönde
+            hemen genellikle yalnızca neredeyse mevcut meydana gelir gelen oluşur oluşan oluşturan oluşmaktadır gerçekleşir gerçekleşen
+            görülür görülen denir verilir ayrılır ayrılan şunlardır belirtmiştir sürmüş yeryüzü"""),
         abbr = words(
             """dr prof doç yrd av sn no bkz örn st mah cad sok apt tel müh uzm öğr gör alb gen bşk hz m.ö m.s a.ş ltd şti org çev ed
             yay krş mö ms"""),
@@ -84,7 +86,7 @@ object Langs {
                 "olarak bilinir|ifade eder|özelliği|özellikleri|önemlidir|önem taşır|unutulmamalıdır|dikkat|" +
                 "sonuç olarak|kısaca|özetle|başlıca|en önemli|amacı|görevi|nedeni|sebebi|formül|kural|ilke"
         ),
-        classCue = rx("türleri|türü|türe ayrılır|ayrılır|ayrılmaktadır|sınıflandırılır|sınıflandırılabilir|sınıflandırma|çeşit|kategori|gruba|gruplara|başlıca|temel olarak|üç ana|dört ana|iki ana|şu şekilde|aşağıdaki"),
+        classCue = rx("(iki|üç|dört|beş|altı)\\s+(alt\\s+)?(aşama|evre|bölüm|grup|tür|çeşit|kısım|basamak|ana|yöntem|yol)|(aşama|evre|bölüm|grup|tür|çeşit|kısım)(dan|den)\\s+oluş|şunlardır|şöyledir|türleri|türü|türe ayrılır|ayrılır|ayrılmaktadır|sınıflandırılır|sınıflandırılabilir|sınıflandırma|çeşit|kategori|gruba|gruplara|başlıca|temel olarak|üç ana|dört ana|iki ana|şu şekilde|aşağıdaki"),
         cause = rx("çünkü|bu nedenle|bu yüzden|bu sebeple|sonucunda|neden olur|yol açar|dolayısıyla|nedeniyle|sayesinde|bu sayede"),
         compare = rx("oysa|buna karşılık|aksine|farklı olarak|benzer şekilde|kıyasla|karşılaştırıldığında|tersine|öte yandan|diğer yandan"),
         example = rx("örneğin|mesela|örnek olarak|bir örnek"),
