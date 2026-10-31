@@ -201,7 +201,7 @@ object Summarizer {
             val chosen = HashSet<Sent>(sec.second)
             Result(mode, sec.first, finalKeywords(cands, chosen, sents, pack), sents.size, wordCount, srcLang)
         } else {
-            val ex = examSections(sents, length, pack, cands)
+            val ex = examSections(sents, length, pack, cands, weights)
             Result(
                 mode, ex.sections, finalKeywords(cands, ex.chosen, sents, pack), sents.size, wordCount, srcLang,
                 qualityNotes = ex.notes
@@ -800,7 +800,7 @@ object Summarizer {
 
     // ------------------------------------------------------------------ sinav / ders notu
 
-    private fun examSections(sents: List<Sent>, length: Length, pack: LangPack, cands: List<Kw>): ExamOut {
+    private fun examSections(sents: List<Sent>, length: Length, pack: LangPack, cands: List<Kw>, weights: Map<String, Double>): ExamOut {
         val timeline = sents.size >= 8 && sents.count { it.hasDate }.toDouble() / sents.size >= 0.35
         for (s in sents) {
             var v = 0.45 * s.base + 0.45 * s.rank
@@ -875,11 +875,29 @@ object Summarizer {
             if (d !in chosen && !redundant(d, chosen)) { add(d); defAdded++ }
         }
 
-        // 3) Puana göre doldurma
-        for (s in sents.sortedByDescending { it.score }) {
-            if (chosen.size >= target || words >= wordBudget) break
-            if (s in chosen || redundant(s, chosen)) continue
-            add(s)
+        // 3) Kapsama tabanlı doldurma (tembel açgözlü seçim): her adımda, henüz özette olmayan ÖNEMLİ kavramları
+        //    en çok kapsayan ve yapısal puanı yüksek cümle seçilir; böylece aynı bilgi tekrarlanmaz, farklı bilgiler kaybolmaz.
+        run {
+            val covered = HashSet<String>()
+            for (c in chosen) covered.addAll(c.stemSet)
+            fun gain(x: Sent): Double {
+                var g = 0.0
+                for (t in x.stemSet) if (t !in covered) g += weights[t] ?: 0.0
+                return g / sqrt(max(1.0, x.stemSet.size.toDouble()))
+            }
+            var gmax = 1e-9
+            for (x in sents) gmax = max(gmax, gain(x))
+            val pq = java.util.PriorityQueue<Pair<Sent, Double>>(compareByDescending { it.second })
+            for (x in sents) if (x !in chosen) pq.add(Pair(x, x.score + 0.8 * gain(x) / gmax))
+            while (chosen.size < target && words < wordBudget && pq.isNotEmpty()) {
+                val (x, old) = pq.poll()
+                if (x in chosen) continue
+                val v = x.score + 0.8 * gain(x) / gmax
+                if (v < old - 1e-9) { pq.add(Pair(x, v)); continue }
+                if (redundant(x, chosen)) continue
+                add(x)
+                covered.addAll(x.stemSet)
+            }
         }
 
         // 3b) Sınıflandırmayı duyuran cümleler ("... iki gruba ayrılır") mutlaka özette olsun
