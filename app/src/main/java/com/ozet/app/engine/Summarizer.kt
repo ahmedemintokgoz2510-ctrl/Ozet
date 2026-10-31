@@ -100,7 +100,8 @@ object Summarizer {
     private val NUM = Regex("\\d+(?:[.,]\\d+)*")
     private val YEAR = Regex("(?<!\\d)(1[0-9]{3}|20[0-9]{2})(?!\\d)")
     private val ACRO = Regex("(?<![\\p{L}\\d])\\p{Lu}{2,}[\\p{Lu}\\d]*(?![\\p{L}])")
-    private val TR_COPULA = Regex("^[^,]{2,45},[^.]{10,170}\\p{L}+(d[ıiuü]r|t[ıiuü]r)[.!]?$")
+    private val TR_COPULA = Regex("^(?:[^,]{2,45},[^.]{10,170}|\\p{Lu}[^.,]{8,140})\\p{L}+(d[ıiuü]r|t[ıiuü]r)[.!]?$")
+    private val TR_COP_END = Regex("^\\p{L}{5,}(d[ıiuü]r|t[ıiuü]r)$")
     private val TR_CASE_END = Regex("^\\p{L}{4,}(de|da|den|dan|nin|nın|nun|nün|yle|yla)$")
     private val FR_PART = Regex("^\\p{L}{4,}(é|ée|és|ées)$")
     private val PCT = Regex("%|٪|yüzde|percent|prozent|por ciento|pour cent|بالمئة|في المائة|بالمائة")
@@ -381,7 +382,12 @@ object Summarizer {
                     t.member = true; found++
                 } else if (!pack.anaphora.containsMatchIn(t.lower)) {
                     val first = t.stems.firstOrNull()
-                    if (first != null && first in h.stemSet && !t.isClass) { t.member = true; t.head = h.idx; found++ }
+                    var shared = 0
+                    for (x in t.stemSet) if (x in h.stemSet) shared++
+                    val near = j - i <= 4 && t.para == h.para
+                    if (!t.isClass && ((first != null && first in h.stemSet) || (near && shared >= 2))) {
+                        t.member = true; t.head = h.idx; found++
+                    }
                 }
                 j++
             }
@@ -520,10 +526,19 @@ object Summarizer {
             Length.MEDIUM -> doubleArrayOf(0.13, 6.0, 36.0, 0.40)
             Length.LONG -> doubleArrayOf(0.22, 12.0, 70.0, 0.55)
         }
-        val t = n * cfg[0] * (0.75 + 0.8 * dense)
+        // Kısa/orta notlarda (öğrenci notu) oran yüksek, çok uzun metinlerde düşük; bilgi yoğunsa daha fazla cümle korunur.
+        val small = 1.0 + 1.2 * max(0.0, (60.0 - n) / 60.0)
+        var t = n * cfg[0] * small * (0.7 + 1.6 * dense)
+        // Tarih ağırlıklı (zaman çizelgesi gibi) metinlerde olayların önemli kısmı korunur.
+        val dated = sents.count { it.hasDate }
+        if (n >= 8 && dated.toDouble() / n >= 0.35) {
+            val f = when (length) { Length.SHORT -> 0.30; Length.MEDIUM -> 0.45; Length.LONG -> 0.65 }
+            t = max(t, dated * f)
+        }
         val lo = min(cfg[1].toInt(), ceil(n * cfg[3]).toInt()).coerceAtLeast(1)
-        val cap = (cfg[2] * (1 + 0.5 * max(0.0, ln(n / 300.0)))).roundToInt()
-        return t.roundToInt().coerceIn(lo, max(lo, cap)).coerceAtMost(n)
+        val capBase = (cfg[2] * (1 + 0.5 * max(0.0, ln(n / 300.0)))).roundToInt()
+        val hi = max(lo, min(capBase, ceil(n * 0.7).toInt()))
+        return t.roundToInt().coerceIn(lo, hi).coerceAtMost(n)
     }
 
     private fun wordRatio(length: Length): Double = when (length) {
@@ -624,6 +639,7 @@ object Summarizer {
     // ------------------------------------------------------------------ sinav / ders notu
 
     private fun examSections(sents: List<Sent>, length: Length, pack: LangPack, cands: List<Kw>): Pair<List<Section>, Set<Sent>> {
+        val timeline = sents.size >= 8 && sents.count { it.hasDate }.toDouble() / sents.size >= 0.35
         for (s in sents) {
             var v = 0.45 * s.base + 0.45 * s.rank
             if (s.isDef) v += 0.28
@@ -634,7 +650,8 @@ object Summarizer {
             if (s.isConc) v += 0.22
             if (s.isExample && s.facts.isNotEmpty()) v += 0.05
             v += 0.05 * min(s.facts.size, 4)
-            if (s.hasDate) v += 0.08
+            if (s.hasDate) v += if (timeline) 0.24 else 0.08
+            if (timeline && s.hasDate && s.ents > 0) v += 0.06
             if (s.hasPct) v += 0.08
             if (s.org) v += 0.05
             if (s.bullet) v += 0.12
@@ -646,7 +663,8 @@ object Summarizer {
         }
         val n = sents.size
         val target = targetCount(sents, length)
-        val wordBudget = max(80, (sents.sumOf { it.words } * wordRatio(length)).toInt())
+        val avgWords = sents.sumOf { it.words }.toDouble() / n
+        val wordBudget = max(80, max((sents.sumOf { it.words } * wordRatio(length)).toInt(), (target * avgWords * 1.2).toInt()))
         val groups = buildGroups(sents, cands)
         for ((gi, g) in groups.withIndex()) for (s in g.members) s.seg = gi
         val chosen = LinkedHashSet<Sent>()
@@ -679,6 +697,13 @@ object Summarizer {
             if (chosen.size >= target || words >= wordBudget) break
             if (s in chosen || redundant(s, chosen)) continue
             add(s)
+        }
+
+        // 3b) Sınıflandırmayı duyuran cümleler ("... iki gruba ayrılır") mutlaka özette olsun
+        var headAdded = 0
+        for (h in sents.filter { it.isClass && !it.bullet && !it.dialogue }.sortedByDescending { it.score }) {
+            if (headAdded >= max(2, target / 4)) break
+            if (h !in chosen && (announced(h, pack) > 0 || h.text.contains(':'))) { add(h); headAdded++ }
         }
 
         // 4) Bütünlük: sınıflandırma üyeleri ve madde listeleri eksik kalmasın
@@ -919,7 +944,7 @@ object Summarizer {
                 val low = pack.lower(orig)
                 val first = wi == 0
                 wi++
-                val cand = low.length >= 3 && low !in pack.stop && low !in pack.generic
+                val cand = low.length >= 3 && low !in pack.stop && low !in pack.generic && !pack.months.matches(low)
                 if (!cand) { prevStem = null; continue }
                 val st = pack.stem(low)
                 val acro = orig.length >= 2 && orig.all { it.isUpperCase() }
@@ -959,6 +984,7 @@ object Summarizer {
             if (best.length >= 8) sc += 0.12
             if (pack.isPast(best)) sc *= 0.3
             if (pack.code == "tr" && (best.endsWith("mak") || best.endsWith("mek"))) sc *= 0.3
+            if (pack.code == "tr" && best.length >= 8 && TR_COP_END.matches(best)) sc *= 0.2
             if (pack.code == "fr" && FR_PART.matches(best) && !proper) sc *= 0.3
             if ((uDlg[st] ?: 0) * 2 > tf) sc *= 0.5
             if (sc < 0.3) continue
@@ -972,7 +998,7 @@ object Summarizer {
             if (c.toDouble() / min(t1, t2) < 0.3) continue
             val w1 = (weights[parts[0]] ?: 0.0) / maxW
             val w2 = (weights[parts[1]] ?: 0.0) / maxW
-            var sc = 0.3 + 0.4 * sqrt(w1 * w2) + 0.25 * min(1.0, ln(1.0 + c) / ln(6.0))
+            var sc = 0.15 + 0.45 * sqrt(w1 * w2) + 0.25 * min(1.0, ln(1.0 + c) / ln(6.0))
             if (headSets.any { parts[0] in it && parts[1] in it }) sc += 0.9
             if ((bProper[key] ?: 0) * 2 >= c) sc += 0.35
             if ((bAcro[key] ?: 0) > 0) sc += 0.3
