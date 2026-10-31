@@ -61,6 +61,7 @@ private class Sent(
     var isExample = false
     var isConc = false
     var isExc = false
+    var isWarn = false
     var hasFormula = false
     var hasDate = false
     var hasPct = false
@@ -132,11 +133,58 @@ object Summarizer {
     private val TR_ORPHAN = Regex("^\\p{L}+\\s+(gibi|ise)\\s|^(birincisi|ikincisi|üçüncüsü|dördüncüsü)\\s")
     private val TR_SUFFIX = Regex("(ndeki|daki|deki|taki|teki|lerin|ların|leri|ları|ler|lar|nin|nın|nun|nün|den|dan|ten|tan|ında|inde|unda|ünde|nda|nde|ın|un|ün|ye|ya)$")
     private val TR_NUM = Regex("^(iki|üç|dört|beş|altı|yedi|sekiz)(ye|ya|den|dan|e|a|li|lı|si|sı)?$")
+    private val STRUCT = setOf(
+        "giriş", "sonuç", "sonuçlar", "özet", "bölüm", "kısım", "başlık", "tablo", "şekil", "madde", "örnek", "kaynakça", "yöntem", "amaç",
+        "introduction", "conclusion", "summary", "chapter", "section", "figure", "table", "example", "abstract", "method", "results",
+        "einleitung", "fazit", "zusammenfassung", "kapitel", "abschnitt", "abbildung", "tabelle", "beispiel",
+        "introducción", "conclusión", "resumen", "capítulo", "sección", "figura", "tabla", "ejemplo", "método", "resultados",
+        "résumé", "chapitre", "tableau", "exemple", "méthode", "résultats",
+        "مقدمة", "خاتمة", "ملخص", "فصل", "جدول", "مثال", "نتائج"
+    )
+    private val UNIT_AFTER = Regex(
+        "^\\s?(?:%|°|mm|cm|km|kg|mg|ml|nm|hz|khz|mhz|ghz|mb|gb|tb|ay|yıl|gün|hafta|saat|dakika|dk|saniye|sn|tl|lira|usd|eur|dolar|euro|kişi|adet|metre|litre|gram|" +
+            "year|month|week|day|hour|min|sec|jahr|monat|tag|woche|stunde|año|mes|semana|día|hora|an|mois|jour|semaine|heure|سنة|يوم|شهر|ساعة)|^\\s?[mglvwn](?![\\p{L}])",
+        RegexOption.IGNORE_CASE
+    )
+    private val WARN = Regex(
+        "uyarı|dikkat|tehlike|asla|kesinlikle|yasaktır|yasak\\b|(?:mayın|meyin|mayınız|meyiniz)(?![\\p{L}])|" +
+            "warning|caution|danger|never|prohibited|must not|achtung|warnung|gefahr|niemals|verboten|" +
+            "advertencia|precaución|peligro|nunca|prohibido|attention|jamais|interdit|تحذير|خطر|ممنوع|أبدا"
+    )
+    private val TR_CLASS2 = Regex(
+        "(?<![\\p{L}\\d])(iki|üç|dört|beş|altı|yedi|sekiz|[2-8])\\s+(temel\\s+|ana\\s+|farklı\\s+|ayrı\\s+)?" +
+            "(aşama|tür|türlü|grup|sınıf|çeşit|kısım|bölüm|adım|evre|dönem|yöntem|özellik|neden|etken|ilke|unsur|bileşen|katman|safha|başlık|kategori)\\p{L}*|" +
+            "(aşama|gruba|gruplara|sınıfa|sınıflara|türe|türlere|kısma|kısımlara|bölüme|bölümlere|evreye|evrelere)\\p{L}*\\s+(ayrılır|incelenir|toplanır|bölünür|ayrılmaktadır|incelenebilir)"
+    )
+    private val TR_GEN = setOf(
+        "nedenle", "nedeniyle", "nedenlerle", "sonucunda", "dolayı", "dolayısıyla", "böylece", "ayrıca", "ancak", "fakat", "çünkü", "olarak",
+        "olan", "olması", "olur", "olmaktadır", "bulunmaktadır", "sağlar", "gerekir", "gerekmektedir", "edin", "ediniz", "yapın", "yapınız",
+        "edilir", "yapılır", "bulunur", "görülür", "oluşur", "denir", "kullanılır", "yapılmalıdır", "edilmelidir"
+    )
     private val PCT = Regex("%|٪|yüzde|percent|prozent|por ciento|pour cent|بالمئة|في المائة|بالمائة")
 
     // ------------------------------------------------------------------ giris noktasi
 
+    /** Dış giriş: beklenmeyen bir hata olursa uygulama çökmez; en azından metnin önemli cümlelerini döndüren güvenli yola düşer. */
     fun summarize(raw: String, requested: Mode, length: Length): Result {
+        return try {
+            summarizeCore(raw, requested, length)
+        } catch (e: Exception) {
+            fallback(raw, length, e)
+        }
+    }
+
+    private fun fallback(raw: String, length: Length, e: Exception): Result {
+        val wc = raw.split(WS).count { it.isNotEmpty() }
+        val parts = raw.replace('\n', ' ').split(Regex("(?<=[.!?…])\\s+")).map { it.trim() }.filter { it.length >= 25 }
+        val k = when (length) { Length.SHORT -> 4; Length.MEDIUM -> 8; Length.LONG -> 14 }.coerceAtMost(parts.size)
+        val step = if (k == 0) 1 else max(1, parts.size / k)
+        val pick = parts.filterIndexed { i, _ -> i % step == 0 }.take(k)
+        val sec = if (pick.isEmpty()) emptyList() else listOf(Section(null, pick, SectionKind.BULLETS, SecTitle.NOTES))
+        return Result(Mode.EXAM, sec, emptyList(), parts.size, wc, "und", qualityNotes = listOf("fallback:" + (e.message ?: e.javaClass.simpleName)))
+    }
+
+    private fun summarizeCore(raw: String, requested: Mode, length: Length): Result {
         val wordCount = raw.split(WS).count { it.isNotEmpty() }
         val detected = Langs.detect(raw)
         val pack = detected ?: Langs.TR
@@ -171,11 +219,12 @@ object Summarizer {
         text = text.replace(HYPHEN_BREAK, "\$1\$2")
         val rawLines = text.split('\n').map { it.trim().replace(MULTI_SPACE, " ") }
 
+        val repThr = if (rawLines.size > 200) 3 else 4
         val freq = HashMap<String, Int>()
         for (l in rawLines) if (l.length in 6..80) freq[l] = (freq[l] ?: 0) + 1
         val lines = rawLines.filter { l ->
             val pageNum = PAGE_NUM.matches(l) || PAGE_LABEL.matches(l)
-            val repeated = l.length in 6..80 && (freq[l] ?: 0) >= 4 && !isDialogueStart(l) && !isBullet(l) && !isTableRow(l)
+            val repeated = l.length in 6..80 && (freq[l] ?: 0) >= repThr && !isDialogueStart(l) && !isBullet(l) && !isTableRow(l)
             !(pageNum || repeated)
         }
 
@@ -190,7 +239,8 @@ object Summarizer {
             for (p in parts) {
                 val t = p.trim()
                 val words = t.count { it == ' ' } + 1
-                if (t.length < (if (bullet) 12 else 25) || words < (if (bullet) 2 else 3)) continue
+                val minLen = if (bullet) 12 else if (t.any { it.isDigit() }) 14 else 25
+                if (t.length < minLen || words < (if (bullet) 2 else 3)) continue
                 val st = stems(t, pack)
                 if (st.size < 2) continue
                 out.add(Sent(out.size, t, st, st.toHashSet(), heading, bullet, dialogue, first, pack.lower(t), para))
@@ -367,7 +417,8 @@ object Summarizer {
         var anyNum = false
         for (m in NUM.findAll(s.text)) {
             val d = m.value.replace(".", "").replace(",", "")
-            if (d.length >= 2 || pct) {
+            val unit = d.length == 1 && UNIT_AFTER.containsMatchIn(s.text.substring(m.range.last + 1, min(s.text.length, m.range.last + 12)))
+            if (d.length >= 2 || pct || unit) {
                 f.add("n:$d")
                 anyNum = true
             }
@@ -408,6 +459,8 @@ object Summarizer {
         s.isExample = pack.example.containsMatchIn(s.lower)
         s.isConc = pack.conclusion.containsMatchIn(s.lower)
         s.isExc = EXC.containsMatchIn(s.lower)
+        s.isWarn = WARN.containsMatchIn(s.lower)
+        if (!s.isClass && pack.code == "tr" && TR_CLASS2.containsMatchIn(s.lower)) s.isClass = true
     }
 
     private fun announced(s: Sent, pack: LangPack): Int {
@@ -556,6 +609,13 @@ object Summarizer {
         for (i in 0 until m) cand[i].rank = r[i] / mx
     }
 
+    /** Çok uzun belgelerde yalnızca baştan değil, belgenin tamamından eşit aralıklı örnekleme yapar. */
+    private fun <T> evenly(list: List<T>, k: Int): List<T> {
+        if (list.size <= k) return list
+        val step = list.size.toDouble() / k
+        return List(k) { list[(it * step).toInt()] }
+    }
+
     private fun jaccard(a: Set<String>, b: Set<String>): Double {
         if (a.isEmpty() || b.isEmpty()) return 0.0
         var c = 0
@@ -584,7 +644,7 @@ object Summarizer {
     /** Uzun cümleyi kısaltır; ama kısaltılan kuyrukta sayı/tarih/formül varsa kesmez (bilgi kaybı önlenir). */
     private fun display(s: Sent): String {
         val t = s.text.replace(WS, " ").trim()
-        val limit = if (s.member || s.isClass || s.facts.size >= 3) 560 else 400
+        val limit = if (s.isClass || s.text.contains(':')) 800 else if (s.member || s.facts.size >= 3) 560 else 400
         if (t.length <= limit) return t
         var cut = cutPoint(t, limit)
         if (t.substring(cut).any { it.isDigit() } || FORMULA.containsMatchIn(t.substring(cut))) {
@@ -605,7 +665,7 @@ object Summarizer {
         val digit = sents.count { s -> s.text.any { ch -> ch.isDigit() } } / n
         var words = 0
         var past = 0
-        for (s in sents.take(3000)) {
+        for (s in evenly(sents, 3000)) {
             for (m in WORD.findAll(s.lower)) {
                 words++
                 if (m.value.length >= 3 && pack.isPast(m.value)) past++
@@ -751,6 +811,7 @@ object Summarizer {
             if (s.isCompare) v += 0.12
             if (s.isConc) v += 0.22
             if (s.isExc) v += 0.10
+            if (s.isWarn) v += 0.12
             if (s.hasFormula) v += 0.14
             if (s.isExample && s.facts.isNotEmpty()) v += 0.05
             v += 0.05 * min(s.facts.size, 4)
@@ -882,11 +943,11 @@ object Summarizer {
         val sorted = sents.map { it.score }.sorted()
         val thr = sorted[(sorted.size * 0.6).toInt().coerceIn(0, sorted.size - 1)]
         val keyFacts = HashSet<String>()
-        for (s in sents) if (s.hasDate || s.hasPct || s.hasFormula || s.score >= thr) keyFacts.addAll(s.facts)
+        for (s in sents) if (s.hasDate || s.hasPct || s.hasFormula || s.hasNum || s.score >= thr) keyFacts.addAll(s.facts)
         if (keyFacts.isNotEmpty()) {
             val covered = HashSet<String>()
             for (s in chosen) covered.addAll(s.facts)
-            val extraCap = max(1, target / 4)
+            val extraCap = max(2, target / 3)
             var extra = 0
             while (extra < extraCap) {
                 var best: Sent? = null
@@ -937,7 +998,7 @@ object Summarizer {
                 if (cap <= 0) break
                 if (s.idx + 1 >= n) continue
                 val nx = sents[s.idx + 1]
-                if (nx.isExc && nx !in chosen && nx.para == s.para && nx.heading == s.heading && !nx.dialogue) {
+                if ((nx.isExc || nx.isWarn) && nx !in chosen && nx.para == s.para && nx.heading == s.heading && !nx.dialogue) {
                     add(nx); cap--
                     notes.add("istisna-eklendi:" + nx.idx)
                 }
@@ -945,16 +1006,18 @@ object Summarizer {
         }
 
         // 7) Hiçbir başlık / konu içeriksiz kalmasın
+        var emptyRepaired = 0
         if (groups.size > 1) {
             for (g in orderedGroups) {
                 if (g.members.none { it in chosen }) {
                     val best = g.members.maxByOrNull { it.score } ?: continue
                     add(best)
-                    notes.add("bos-baslik-onarildi:" + (g.title ?: "-"))
+                    emptyRepaired++
                 }
             }
         }
 
+        if (emptyRepaired > 0) notes.add("bos-baslik-onarildi=" + emptyRepaired)
         // 7b) Büyük bölümler orantısız şekilde boş kalmasın
         if (groups.size > 1) {
             val pool = if (groups.size <= max(8, target * 2)) groups else orderedGroups
@@ -1023,6 +1086,13 @@ object Summarizer {
             if (keyFacts.isNotEmpty()) {
                 notes.add("olgu-kapsami=%" + (100 * keyFacts.count { it in cov } / keyFacts.size))
             }
+            for (h in chosen) {
+                if (!h.isClass || h.bullet) continue
+                val ann = announced(h, pack)
+                if (ann !in 2..8) continue
+                val have = (byHead[h.idx]?.count { it in chosen } ?: 0) + sents.count { it.idx > h.idx && it.idx <= h.idx + 14 && it.bullet && it.heading == h.heading && it in chosen }
+                if (have in 1 until ann) notes.add("liste-eksik-olabilir:" + h.idx + "(" + have + "/" + ann + ")")
+            }
             notes.add("cumle=" + chosen.size + "/" + n)
         }
 
@@ -1089,6 +1159,7 @@ object Summarizer {
             if (best != null) picks.add(best)
         }
 
+        val pickSet = HashSet<Sent>(picks)
         val ev = DoubleArray(n)
         for (i in 0 until n) {
             val s = sents[i]
@@ -1106,6 +1177,7 @@ object Summarizer {
             v += 0.12 * bump(pos, 0.12, 0.07) + 0.12 * bump(pos, 0.5, 0.08) +
                 0.3 * bump(pos, 0.78, 0.07) + 0.1 * bump(pos, 0.96, 0.04)
             if (s.dialogue) v *= 0.8
+            if (s in pickSet) v *= 0.55
             ev[i] = v
         }
         val gap = max(1, n / (m * 2))
@@ -1132,16 +1204,26 @@ object Summarizer {
         return m.filter { it.value * 2 >= mx }.keys.minByOrNull { it.length } ?: m.keys.first()
     }
 
-    /** Türkçe çekim ekini görüntüde kaldırır ("bitkilerin" -> "bitki"); kalan kısım en az 4 harf olmalı. */
+    /** Türkçe çekim eklerini yalnızca GÖRÜNTÜDE kaldırır ("kiralarda" -> "kira", "kullanımını" -> "kullanım"); kalan kısım en az 4 harf olmalı. */
+    private val TR_SUFFIX2 = Regex(
+        "(larından|lerinden|larında|lerinde|ların|lerin|larda|lerde|lardan|lerden|lara|lere|ları|leri|" +
+            "sından|sinden|sundan|sünden|ından|inden|undan|ünden|sında|sinde|sunda|sünde|ında|inde|unda|ünde|" +
+            "sını|sini|sunu|sünü|ını|ini|unu|ünü|nın|nin|nun|nün|ndan|nden|nda|nde|" +
+            "dan|den|tan|ten|ler|lar|yla|yle)$"
+    )
+
     private fun trBase(w: String): String {
-        val m = TR_SUFFIX.find(w) ?: return w
-        val base = w.substring(0, m.range.first)
-        if (base.length < 4) return w
-        val suf = m.value
-        if ((suf == "ye" || suf == "ya") && (base.endsWith("me") || base.endsWith("ma"))) {
-            return base + (if (base.endsWith("me")) "si" else "sı")
+        var cur = w
+        for (pass in 0 until 2) {
+            val m = TR_SUFFIX2.find(cur) ?: TR_SUFFIX.find(cur) ?: break
+            val base = cur.substring(0, m.range.first)
+            if (base.length < 4) break
+            val suf = m.value
+            cur = if ((suf == "ye" || suf == "ya") && (base.endsWith("me") || base.endsWith("ma"))) {
+                base + (if (base.endsWith("me")) "si" else "sı")
+            } else base
         }
-        return base
+        return cur
     }
 
     private fun titleWord(low: String, acro: Boolean, pack: LangPack): String {
@@ -1202,10 +1284,11 @@ object Summarizer {
         val bSurf = HashMap<String, HashMap<String, Int>>()
         val bProper = HashMap<String, Int>()
         val bAcro = HashMap<String, Int>()
-        class Txt(val text: String, val dialogue: Boolean)
+        val uLast = HashMap<String, Int>()
+        class Txt(val text: String, val dialogue: Boolean, val head: Boolean = false)
         val texts = ArrayList<Txt>()
-        for (s in sents.take(6000)) texts.add(Txt(s.text, s.dialogue))
-        for (h in seenHeads) texts.add(Txt(h, false))
+        for (s in evenly(sents, 6000)) texts.add(Txt(s.text, s.dialogue))
+        for (h in seenHeads) texts.add(Txt(h, false, true))
         for (s in texts) {
             var prevStem: String? = null
             var prevLow = ""
@@ -1213,17 +1296,19 @@ object Summarizer {
             var prevCap = false
             var prevAcro = false
             var wi = 0
+            val lastStart = if (s.head) -1 else (WORD.findAll(s.text).lastOrNull()?.range?.first ?: -1)
             for (m in WORD.findAll(s.text)) {
                 val orig = m.value
                 val low = pack.lower(orig)
                 val first = wi == 0
                 wi++
-                val cand = low.length >= 3 && low !in pack.stop && low !in pack.generic && !pack.months.matches(low)
+                val cand = low.length >= 3 && low !in pack.stop && low !in pack.generic && low !in STRUCT && !(pack.code == "tr" && low in TR_GEN) && !pack.months.matches(low)
                 if (!cand) { prevStem = null; continue }
                 val st = pack.stem(low)
                 val acro = orig.length >= 2 && orig.all { it.isUpperCase() }
                 val cap = pack.hasCase && pack.code != "de" && !first && orig[0].isUpperCase() && orig.drop(1).any { it.isLowerCase() }
                 uTf[st] = (uTf[st] ?: 0) + 1
+                if (m.range.first == lastStart) uLast[st] = (uLast[st] ?: 0) + 1
                 val sm = uSurf.getOrPut(st) { HashMap() }
                 sm[low] = (sm[low] ?: 0) + 1
                 if (acro) uAcro[st] = (uAcro[st] ?: 0) + 1
@@ -1261,6 +1346,7 @@ object Summarizer {
             if (pack.code == "tr" && best.length >= 8 && TR_COP_END.matches(best)) sc *= 0.2
             if (pack.code == "fr" && FR_PART.matches(best) && !proper) sc *= 0.3
             if ((uDlg[st] ?: 0) * 2 > tf) sc *= 0.5
+            if (pack.code == "tr" && tf >= 2 && (uLast[st] ?: 0) * 2 >= tf && !proper && !acro) sc *= 0.25
             if (sc < 0.3) continue
             out.add(Kw(st, titleWord(best, acro, pack), setOf(st), tf, false, sc))
         }
@@ -1270,6 +1356,7 @@ object Summarizer {
             val t1 = uTf[parts[0]] ?: continue
             val t2 = uTf[parts[1]] ?: continue
             if (c.toDouble() / min(t1, t2) < 0.3) continue
+            if (pack.code == "tr" && t2 >= 2 && (uLast[parts[1]] ?: 0) * 10 >= t2 * 6 && (bProper[key] ?: 0) == 0 && (bAcro[key] ?: 0) == 0) continue
             val w1 = (weights[parts[0]] ?: 0.0) / maxW
             val w2 = (weights[parts[1]] ?: 0.0) / maxW
             var sc = 0.15 + 0.45 * sqrt(w1 * w2) + 0.25 * min(1.0, ln(1.0 + c) / ln(6.0))
