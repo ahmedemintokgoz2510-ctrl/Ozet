@@ -106,6 +106,7 @@ object Summarizer {
     private val FR_PART = Regex("^\\p{L}{4,}(é|ée|és|ées)$")
     private val TR_ORPHAN = Regex("^\\p{L}+\\s+(gibi|ise)\\s|^(birincisi|ikincisi|üçüncüsü|dördüncüsü)\\s")
     private val TR_SUFFIX = Regex("(ndeki|daki|deki|taki|teki|lerin|ların|leri|ları|ler|lar|nin|nın|nun|nün|den|dan|ten|tan|ında|inde|unda|ünde|nda|nde|ın|un|ün|ye|ya)$")
+    private val TR_NUM = Regex("^(iki|üç|dört|beş|altı|yedi|sekiz)(ye|ya|den|dan|e|a|li|lı|si|sı)?$")
     private val PCT = Regex("%|٪|yüzde|percent|prozent|por ciento|pour cent|بالمئة|في المائة|بالمائة")
 
     // ------------------------------------------------------------------ giris noktasi
@@ -353,9 +354,23 @@ object Summarizer {
     }
 
     private fun announced(s: Sent, pack: LangPack): Int {
-        for (m in WORD.findAll(s.lower)) pack.numWords[m.value]?.let { return it }
+        for (m in WORD.findAll(s.lower)) {
+            pack.numWords[m.value]?.let { return it }
+            if (pack.code == "tr") {
+                val g = TR_NUM.find(m.value)?.groupValues?.get(1)
+                if (g != null) pack.numWords[g]?.let { return it }
+            }
+        }
         val d = Regex("(?<![\\d.,])([2-8])(?![\\d.,%])").find(s.text)?.value?.toIntOrNull()
         return d ?: 0
+    }
+
+    /** "Profazda ...", "Metafazda ..." gibi aynı ekle başlayan paralel cümlelerin ortak eki (yoksa null). */
+    private fun parTail(s: Sent): String? {
+        val w = s.text.substringBefore(' ').trim { !it.isLetter() }.lowercase(Locale.ROOT)
+        if (w.length < 5 || !w.all { it.isLetter() }) return null
+        val t = w.takeLast(2)
+        return if (t == "da" || t == "de" || t == "ta" || t == "te") t else null
     }
 
     /** Sınıflandırma duyuran cümlelerin (ör. "üç türü vardır") üyelerini ve madde listelerini işaretler. */
@@ -370,6 +385,23 @@ object Summarizer {
                 s.member = true
             }
             prev = s
+        }
+        if (pack.code == "tr") {
+            var i0 = 0
+            while (i0 < n) {
+                val a = sents[i0]
+                val tail = if (!a.bullet && !a.dialogue && !a.isClass) parTail(a) else null
+                if (tail == null) { i0++; continue }
+                var j0 = i0 + 1
+                while (j0 < n && sents[j0].para == a.para && sents[j0].heading == a.heading &&
+                    !sents[j0].bullet && !sents[j0].dialogue && parTail(sents[j0]) == tail
+                ) j0++
+                if (j0 - i0 >= 3) {
+                    runId++
+                    for (k in i0 until j0) { sents[k].run = runId; sents[k].member = true }
+                }
+                i0 = j0
+            }
         }
         for (i in 0 until n) {
             val h = sents[i]
@@ -676,12 +708,21 @@ object Summarizer {
             return false
         }
 
+        val headStemSets = HashMap<String, Set<String>>()
+        fun headBonus(g: Grp, s: Sent): Double {
+            val t = g.title ?: return 0.0
+            val hs = headStemSets.getOrPut(t) { stems(t, pack).toHashSet() }
+            if (hs.isEmpty()) return 0.0
+            val share = hs.count { it in s.stemSet }.toDouble() / hs.size
+            return 0.15 * share + (if (s.isDef && share > 0.0) 0.12 else 0.0)
+        }
+
         // 1) Her başlığın / konunun altında en az bir açıklayıcı cümle
         val maxGroups = max(2, (target * 1.3).toInt())
         val orderedGroups = groups.sortedByDescending { g -> g.members.sumOf { it.score } }.take(maxGroups)
         if (groups.size > 1) {
             for (g in orderedGroups) {
-                val best = g.members.maxByOrNull { it.score + (if (it.paraStart) 0.03 else 0.0) } ?: continue
+                val best = g.members.maxByOrNull { it.score + (if (it.paraStart) 0.03 else 0.0) + headBonus(g, it) } ?: continue
                 if (!redundant(best, chosen)) add(best)
             }
         }
@@ -723,7 +764,7 @@ object Summarizer {
                 if (s.head >= 0 && add(sents[s.head])) changed = true
                 if (s.run >= 0) {
                     val mates = sents.filter { it.run == s.run }
-                    val keep = if (mates.size <= runCap) mates else (mates.filter { it in chosen } + mates.sortedByDescending { it.score }).distinct().take(runCap)
+                    val keep = if (mates.size <= max(runCap, 8)) mates else (mates.filter { it in chosen } + mates.sortedByDescending { it.score }).distinct().take(runCap)
                     for (t in keep) if (add(t)) changed = true
                 }
             }
@@ -739,6 +780,24 @@ object Summarizer {
                 if (nx !in chosen && nx.para == s.para && nx.heading == s.heading && !nx.dialogue &&
                     pack.anaphora.containsMatchIn(nx.lower) && !nx.isClass
                 ) { add(nx); cap-- }
+            }
+        }
+
+        // 4c) Seçilen üye/sınıflandırma cümlesinde adı geçen kavramın kendi açıklama cümlesi (ör. "osmoz", "aktif taşıma")
+        run {
+            var cap = max(2, target / 3)
+            val anchors = chosen.filter { it.member || it.isClass }
+            if (anchors.isNotEmpty()) {
+                for (u in sents) {
+                    if (cap <= 0) break
+                    if (u in chosen || u.dialogue || u.member || u.words < 6) continue
+                    if (pack.anaphora.containsMatchIn(u.lower)) continue
+                    val f = u.stems.firstOrNull() ?: continue
+                    if (f.length < 4) continue
+                    if (anchors.any { a -> a.heading == u.heading && a.idx != u.idx && f in a.stemSet } && !redundant(u, chosen)) {
+                        add(u); cap--
+                    }
+                }
             }
         }
 
@@ -810,7 +869,17 @@ object Summarizer {
             val share = target.toDouble() / n
             for (g in pool) {
                 if (g.members.size < 3) continue
-                val want = min(4, max(1, (g.members.size * share * 0.7).roundToInt()))
+                val sz = g.members.size
+                var floor = when {
+                    sz >= 14 -> 5
+                    sz >= 10 -> 4
+                    sz >= 6 -> 3
+                    sz >= 4 -> 2
+                    else -> 1
+                }
+                if (length == Length.SHORT) floor = max(1, floor - 1)
+                if (length == Length.LONG) floor += 1
+                val want = min(8, max(floor, (sz * share * 0.9).roundToInt()))
                 var have = g.members.count { it in chosen }
                 if (have >= want) continue
                 for (s in g.members.sortedByDescending { it.score }) {
@@ -931,7 +1000,12 @@ object Summarizer {
     private fun trBase(w: String): String {
         val m = TR_SUFFIX.find(w) ?: return w
         val base = w.substring(0, m.range.first)
-        return if (base.length >= 4) base else w
+        if (base.length < 4) return w
+        val suf = m.value
+        if ((suf == "ye" || suf == "ya") && (base.endsWith("me") || base.endsWith("ma"))) {
+            return base + (if (base.endsWith("me")) "si" else "sı")
+        }
+        return base
     }
 
     private fun titleWord(low: String, acro: Boolean, pack: LangPack): String {
@@ -973,6 +1047,14 @@ object Summarizer {
                 if (prev != null) defPhrases.add("$prev $st")
                 prev = st
             }
+        }
+
+        for (s in sents) {
+            if (!s.member || s.dialogue) continue
+            val m = WORD.find(s.text) ?: continue
+            val low = pack.lower(m.value)
+            if (low.length < 5 || low in pack.stop || low in pack.generic) continue
+            defStems.add(pack.stem(low))
         }
 
         val uTf = HashMap<String, Int>()
@@ -1032,8 +1114,8 @@ object Summarizer {
             val proper = tf >= 2 && (uCap[st] ?: 0).toDouble() / tf >= 0.5
             val inDef = st in defStems
             val best = pickSurface(uSurf[st]!!)
-            var sc = 0.55 * ((weights[st] ?: 0.0) / maxW) + 0.1 * min(1.0, ln(1.0 + tf) / ln(6.0))
-            if (inHead) sc += 0.8
+            var sc = 0.55 * ((weights[st] ?: 0.0) / maxW) + 0.3 * min(1.0, ln(1.0 + tf) / ln(21.0))
+            if (inHead) sc += 0.35
             if (acro) sc += 0.6
             if (proper) sc += 0.45
             if (inDef) sc += 0.5
@@ -1055,7 +1137,7 @@ object Summarizer {
             val w1 = (weights[parts[0]] ?: 0.0) / maxW
             val w2 = (weights[parts[1]] ?: 0.0) / maxW
             var sc = 0.15 + 0.45 * sqrt(w1 * w2) + 0.25 * min(1.0, ln(1.0 + c) / ln(6.0))
-            if (headSets.any { parts[0] in it && parts[1] in it }) sc += 0.9
+            if (headSets.any { parts[0] in it && parts[1] in it }) sc += 0.5
             if ((bProper[key] ?: 0) * 2 >= c) sc += 0.35
             if ((bAcro[key] ?: 0) > 0) sc += 0.3
             if (key in defPhrases) sc += 0.5
@@ -1080,11 +1162,11 @@ object Summarizer {
         for (h in sents.mapNotNull { it.heading }.toSet()) headStems.addAll(stems(h, pack))
         val n = sents.size
         val limit = when {
-            n < 10 -> 4
-            n < 30 -> 6
-            n < 80 -> 8
-            n < 300 -> 9
-            else -> 10
+            n < 10 -> 5
+            n < 30 -> 7
+            n < 80 -> 10
+            n < 300 -> 11
+            else -> 12
         }
         val ranked = ArrayList<Kw>()
         for (k in cands) {
@@ -1095,12 +1177,31 @@ object Summarizer {
         }
         ranked.sortByDescending { it.score }
         val floor = if (ranked.isEmpty()) 0.0 else ranked[0].score * 0.3
+        val cap = max(2, (limit + 2) / 3)
+        val perHead = HashMap<String, Int>()
+        fun headOf(k: Kw): String? {
+            val cnt = HashMap<String, Int>()
+            for (s in sents) {
+                val h = s.heading ?: continue
+                if (k.stems.all { it in s.stemSet }) cnt[h] = (cnt[h] ?: 0) + 1
+            }
+            return cnt.maxByOrNull { it.value }?.key
+        }
         val picked = ArrayList<Kw>()
+        val skipped = ArrayList<Kw>()
         for (k in ranked) {
             if (picked.size >= limit) break
             if (k.score < floor) break
             if (picked.any { it.stems.containsAll(k.stems) }) continue
+            val h = headOf(k)
+            if (h != null && (perHead[h] ?: 0) >= cap) { skipped.add(k); continue }
             if (k.phrase) picked.removeAll { !it.phrase && k.stems.containsAll(it.stems) }
+            picked.add(k)
+            if (h != null) perHead[h] = (perHead[h] ?: 0) + 1
+        }
+        for (k in skipped) {
+            if (picked.size >= limit) break
+            if (picked.any { it.stems.containsAll(k.stems) }) continue
             picked.add(k)
         }
         return picked.map { it.surface }.distinct()
