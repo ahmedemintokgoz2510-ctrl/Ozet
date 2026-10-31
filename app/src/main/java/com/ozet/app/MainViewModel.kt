@@ -18,6 +18,7 @@ import com.ozet.app.engine.Result
 import com.ozet.app.engine.Summarizer
 import com.ozet.app.engine.Translate
 import com.ozet.app.i18n.AppLang
+import com.ozet.app.ui.RewardedGate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -35,6 +36,7 @@ sealed interface UiState {
     data object Paste : UiState
     data object Loading : UiState
     data class Working(val secondsLeft: Int, val ready: Boolean) : UiState
+    data object Reward : UiState
     data class Done(val result: Result, val mode: Mode, val length: Length, val fileName: String) : UiState
     data class Error(val kind: Err) : UiState
 }
@@ -66,6 +68,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var mode = Mode.AUTO
     private var length = _defaultLength.value
     private var job: Job? = null
+    private var pending: UiState.Done? = null
 
     private fun readLength(): Length = try {
         Length.valueOf(settings.getString("length", "MEDIUM") ?: "MEDIUM")
@@ -157,32 +160,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         job?.cancel()
         name = label
         mode = Mode.AUTO
-        _state.value = UiState.Working(WAIT, false)
+        _state.value = UiState.Working(0, false)
+        pending = null
         job = viewModelScope.launch {
-            val work = async {
-                runCatching {
-                    val t = withContext(Dispatchers.IO) { load() }
-                    if (t.isBlank()) throw AppError(Err.NO_TEXT)
-                    val res = build(t, mode, length)
-                    if (res.sentenceCount == 0) throw AppError(Err.TOO_SHORT)
-                    Pair(t, res)
-                }
+            RewardedGate.load(getApplication())
+            val outcome = runCatching {
+                val t = withContext(Dispatchers.IO) { load() }
+                if (t.isBlank()) throw AppError(Err.NO_TEXT)
+                val res = build(t, mode, length)
+                if (res.sentenceCount == 0) throw AppError(Err.TOO_SHORT)
+                Pair(t, res)
             }
-            for (left in WAIT downTo 1) {
-                _state.value = UiState.Working(left, work.isCompleted)
-                if (work.isCompleted && work.await().isFailure) break
-                delay(1000)
-            }
-            val outcome = work.await()
             outcome.onSuccess { pair ->
                 text = pair.first
                 val saved = withContext(Dispatchers.IO) { store.add(label, type, size, pair.first) }
                 _history.value = saved
-                _state.value = UiState.Done(pair.second, mode, length, name)
+                pending = UiState.Done(pair.second, mode, length, name)
+                _state.value = UiState.Reward
             }.onFailure { e ->
                 _state.value = UiState.Error((e as? AppError)?.kind ?: Err.READ)
             }
         }
+    }
+
+    /** Ödüllü reklam izlendi: özeti göster. */
+    fun unlock() {
+        pending?.let { _state.value = it }
+        pending = null
     }
 
     private fun resummarize(m: Mode, l: Length) {
