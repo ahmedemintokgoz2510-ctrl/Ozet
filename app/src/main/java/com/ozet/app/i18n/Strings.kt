@@ -71,6 +71,13 @@ class Strings(
     val translatedNote: String,
     val translateFail: String,
     val langPackHint: String,
+    val rewardTitle: String,
+    val rewardDesc: String,
+    val rewardWatch: String,
+    val rewardLoading: String,
+    val rewardFailed: String,
+    val rewardRetry: String,
+    val workingText: String,
     val unitB: String,
     val unitKB: String,
     val unitMB: String
