@@ -14,10 +14,14 @@ import java.io.InputStream
 import java.nio.charset.Charset
 import java.util.zip.ZipInputStream
 
+enum class Err { NO_TEXT, TOO_SHORT, ENCRYPTED, NOT_FOUND, OPEN, READ }
+
+class AppError(val kind: Err) : Exception()
+
 object Extractor {
     private const val MAX_CHARS = 4_000_000
 
-    fun displayName(context: Context, uri: Uri): String {
+    fun displayName(context: Context, uri: Uri, fallback: String = "File"): String {
         var name: String? = null
         try {
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
@@ -25,7 +29,7 @@ object Extractor {
             }
         } catch (e: Exception) {
         }
-        return name ?: uri.lastPathSegment ?: "Dosya"
+        return name ?: uri.lastPathSegment ?: fallback
     }
 
     suspend fun extract(context: Context, uri: Uri): String = withContext(Dispatchers.IO) {
@@ -51,7 +55,7 @@ object Extractor {
         val input = context.contentResolver.openInputStream(uri) ?: return ""
         return input.use { ins ->
             PDDocument.load(ins).use { doc ->
-                if (doc.isEncrypted) throw IllegalStateException("Bu PDF şifreli, açılamadı.")
+                if (doc.isEncrypted) throw AppError(Err.ENCRYPTED)
                 PDFTextStripper().getText(doc)
             }
         }
