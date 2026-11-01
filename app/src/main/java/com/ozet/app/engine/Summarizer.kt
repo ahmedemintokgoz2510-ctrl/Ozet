@@ -72,8 +72,63 @@ private class Sent(
     var org = false
     var run = -1
     var seg = 0
+    // --- hikâye motoru alanları (yalnızca iç kullanım; dış veri modeli değişmedi)
+    var cs: IntArray = IntArray(0)   // cümlede geçen karakter kimlikleri
+    var subj = -1                    // cümlenin öznesi/konuşanı olan karakter (yoksa -1)
+    var introN = 0                   // bu cümlede ilk kez tanıtılan önemli karakter sayısı
+    var meet = false                 // iki önemli karakterin ilk karşılaşması
+    var fDec = false
+    var fConf = false
+    var fRev = false
+    var fChg = false
+    var fRes = false
+    var fNew = false
+    var newObj = 0
+    var fTime = false
+    var fPron = false
+    var fResStart = false
+    var act = false
+    var obj = false
+    var resNext = false
+    var ev = 0
+    var evs = 0.0
+    var tps = 0.0
     val words: Int = text.count { it == ' ' } + 1
 }
+
+/** Hikâyedeki bir karakter: tam ad / takma ad kümesi, ilk geçiş ve önem puanı. */
+private class Chr(val id: Int, val name: String) {
+    var mentions = 0
+    var first = -1
+    var introIdx = -1
+    var last = -1
+    var spans = 0
+    var acts = 0
+    var imp = 0.0
+    var major = false
+}
+
+private class CharModel(val list: List<Chr>, val nameStems: Set<String>) {
+    val byId: Map<Int, Chr> = list.associateBy { it.id }
+}
+
+/** Hikâyedeki bir olay (ardışık cümle aralığı). */
+private class Ev(val from: Int, val to: Int) {
+    var value = 0.0
+    val picks = ArrayList<Sent>()
+}
+
+private class StoryOut(
+    val sections: List<Section>,
+    val chosen: List<Sent>,
+    val notes: List<String>,
+    val chars: List<Chr> = emptyList(),
+    val nameStems: Set<String> = emptySet(),
+    val spread: Map<String, Int> = emptyMap(),
+    val nEv: Int = 1,
+    val salient: Set<String> = emptySet(),
+    val timeish: Set<String> = emptySet()
+)
 
 private class Kw(
     val key: String,
@@ -163,6 +218,55 @@ object Summarizer {
     )
     private val PCT = Regex("%|٪|yüzde|percent|prozent|por ciento|pour cent|بالمئة|في المائة|بالمائة")
 
+    // ---- hikâye motoru kalıpları (küçük harfli cümle üzerinde aranır; TR/EN/DE/ES/FR/AR)
+    private val SPEECH = Regex(
+        """(?<![\p{L}])(?:dedi|diye\s+\p{L}+|söyledi|fısıldadı|bağırdı|sordu|yanıtladı|said|asked|replied|answered|shouted|whispered|cried|""" +
+            """sagte|fragte|antwortete|rief|flüsterte|dijo|preguntó|respondió|gritó|susurró|dit|demanda|répondit|s'écria|murmura|قال|سأل|أجاب|صرخ|همس)(?![\p{L}])"""
+    )
+    private val DECISION = Regex(
+        """karar ver|karar al|kararını|razı ol|söz verdi|yemin et|seçti|decided|resolved to|made up (?:his|her|their) mind|promised|vowed|chose to|so (?:he|she|they|i|we) |""" +
+            """beschloss|entschied|versprach|decidió|resolvió|prometió|décida|promit|قرر|وعد"""
+    )
+    private val CONFLICT = Regex(
+        """öfkelen|kızdı|bağır|kavga|saldır|çatış|tehdit|suçla|kaçtı|kovala|peşinden|yakalan|savaş|korktu|dövüş|öldü|ölüm|yaralan|yığıldı|kaybol|yok oldu|çalın|çaldı|zehir|""" +
+            """died|killed|wounded|vanished|disappeared|stolen|stole|lost his|lost her|broke his|broke her|""" +
+            """attack|fight|fought|angry|shout|threat|accus|chase|escaped|fled|afraid|angriff|kampf|wütend|schrie|drohte|verfolg|floh|""" +
+            """atac|pelea|enojad|gritó|amenaz|persigu|huyó|combat|colère|menaç|poursui|fuit|هاجم|صرخ|هرب|غضب"""
+    )
+    private val REVEAL = Regex(
+        """fark et|anladı|öğrendi(?!k)|hatırladı|remembered|recalled|keşfet|ortaya çık|itiraf|meğer|anlaşıldı|""" +
+            """discover|realiz|learned|found out|revealed|confess|entdeck|erkannte|erfuhr|""" +
+            """descubr|se dio cuenta|découvr|réalisa|apprit|اكتشف|أدرك"""
+    )
+    private val NEWEV = Regex(
+        """birden|ansızın|belirdi|ortaya çıktı|karşısına çıktı|suddenly|appeared|arrived|came upon|plötzlich|erschien|de repente|apareció|soudain|apparut|فجأة"""
+    )
+    private val CHANGE = Regex(
+        """artık|bir daha|ilk kez|değişti|dönüştü|cesaretlen|güçlen|olgunlaş|alıştı|never again|no longer|for the first time|from then on|changed|became|nie wieder|nicht mehr|""" +
+            """zum ersten|verändert|ya no|por primera vez|cambió|ne plus|pour la première|changea|لم يعد|لأول مرة|تغير"""
+    )
+    private val RESOLUTION = Regex(
+        """sonunda|nihayet|kavuştu|kurtul|başardı|yenildi|kazandı|huzur|finally|at last|in the end|succeeded|defeated|peace|""" +
+            """endlich|schließlich|besiegt|gelang|por fin|finalmente|logró|derrot|enfin|finalement|réussit|vaincu|أخيرا|نجح|هزم"""
+    )
+    private val TIME_SHIFT = Regex(
+        """ertesi (?:gün|sabah|akşam|hafta)|^(?:bir )?(?:sabah|akşam|gün)\b|o gece|birkaç gün sonra|bir hafta sonra|aylar sonra|yıllar sonra|bir gün|günler sonra|""" +
+            """next (?:day|morning|week)|days later|weeks later|years later|that night|one day|am nächsten|tage später|jahre später|eines tages|""" +
+            """al día siguiente|días después|años después|un día|esa noche|le lendemain|jours plus tard|années plus tard|un jour|""" +
+            """في اليوم التالي|بعد أيام|ذات يوم"""
+    )
+    private val RESULT_START = Regex(
+        """^(?:böylece|bu yüzden|bu nedenle|bunun üzerine|bu sayede|so|thus|therefore|as a result|deshalb|daher|dadurch|así|por eso|por lo tanto|""" +
+            """ainsi|donc|alors|لذلك|وهكذا)(?![\p{L}])"""
+    )
+    private val PRON_START = Regex(
+        """^(?:o(?!\s+(?:gece|gün|akşam|sabah|zaman|anda))|onlar|ona|onu|onun|onlara|onları|bunu|buna|bunun|bunlar|bunlara|şunu|orada|oraya|burada|""" +
+            """he|she|it|they|him|her|them|this|that(?!\s+(?:night|day|morning))|these|those|there|er|sie|es|dies|das|diese|dort|""" +
+            """él|ella|ellos|ellas|esto|eso|esta|ese|allí|il|elle|ils|elles|ce|cela|ça|ceci|là|هو|هي|هم|هذا|هذه|ذلك)\s"""
+    )
+    private val EARLY_DEMO = Regex("""(?:^| )(?:bunu|buna|bunun|bundan|bunlar|bunları|bunlara|şunu|şuna|this|that|these|those|dies|dieses|diesen|esto|eso|ceci|cela)(?![\p{L}])""")
+    private val DEMO_START = Regex("""^(?:bu|şu|this|that|these|those|dieser|diese|dieses|este|esta|ese|esa|ce|cet|cette|ces|هذا|هذه)\s""")
+
     // ------------------------------------------------------------------ giris noktasi
 
     /** Dış giriş: beklenmeyen bir hata olursa uygulama çökmez; en azından metnin önemli cümlelerini döndüren güvenli yola düşer. */
@@ -197,9 +301,9 @@ object Summarizer {
         val mode = if (requested == Mode.AUTO) detect(sents, pack) else requested
         val cands = keywordCandidates(sents, weights, pack)
         return if (mode == Mode.STORY) {
-            val sec = storySections(sents, length, pack)
-            val chosen = HashSet<Sent>(sec.second)
-            Result(mode, sec.first, finalKeywords(cands, chosen, sents, pack), sents.size, wordCount, srcLang)
+            val sec = storySections(sents, length, pack, weights)
+            val chosen = HashSet<Sent>(sec.chosen)
+            Result(mode, sec.sections, finalKeywords(storyCands(cands, sec, pack), chosen, sents, pack), sents.size, wordCount, srcLang, qualityNotes = sec.notes)
         } else {
             val ex = examSections(sents, length, pack, cands, weights)
             Result(
@@ -672,8 +776,19 @@ object Summarizer {
             }
         }
         val pastRate = if (words == 0) 0.0 else past.toDouble() / words
-        val exam = 5 * def + 2.5 * bullet + 3 * head + 1.5 * digit
-        val story = 4 * dialog + 7 * pastRate
+        // Ek kanıtlar: konuşma fiili ("dedi", "said"...), tekrar eden özel adlar (karakter), formül ve tarih yoğunluğu.
+        val speech = sents.count { SPEECH.containsMatchIn(it.lower) } / n
+        val formula = sents.count { it.hasFormula } / n
+        val dated = sents.count { it.hasDate } / n
+        val nf = HashMap<String, Int>()
+        for (s in sents) for (m in NAME.findAll(s.text)) { val k = m.value.lowercase(pack.locale); nf[k] = (nf[k] ?: 0) + 1 }
+        val recurring = nf.filter { it.value >= 4 }.keys
+        val named = if (recurring.isEmpty()) 0.0
+        else sents.count { s -> NAME.findAll(s.text).any { it.value.lowercase(pack.locale) in recurring } } / n
+        val exam = 5 * def + 2.5 * bullet + 3 * head + 1.5 * digit + 2.5 * formula + 2 * dated
+        val story = 4 * dialog + 7 * pastRate + 4 * speech + 1.5 * named
+        // Diyalog içeren, tanım/madde/formül içermeyen metin ders notu sayılmaz.
+        if (dialog >= 0.2 && speech >= 0.05 && def <= 0.1 && bullet <= 0.05 && formula <= 0.02) return Mode.STORY
         return if (story >= exam && story > 0.6) Mode.STORY else Mode.EXAM
     }
 
@@ -698,7 +813,15 @@ object Summarizer {
             t = max(t, dated * f)
         }
         val lo = min(cfg[1].toInt(), ceil(n * cfg[3]).toInt()).coerceAtLeast(1)
-        val capBase = (cfg[2] * (1 + 0.5 * max(0.0, ln(n / 300.0)))).roundToInt()
+        var capBase = (cfg[2] * (1 + 0.5 * max(0.0, ln(n / 300.0)))).roundToInt()
+        // Kitap boyutundaki metinlerde (binlerce cümle) Orta/Uzun özet de buna göre uzar.
+        if (n >= 1500) {
+            when (length) {
+                Length.LONG -> capBase = max(capBase, min(600, (n * 0.035).roundToInt()))
+                Length.MEDIUM -> capBase = max(capBase, min(300, (n * 0.015).roundToInt()))
+                Length.SHORT -> {}
+            }
+        }
         val hi = max(lo, min(capBase, ceil(n * 0.7).toInt()))
         return t.roundToInt().coerceIn(lo, hi).coerceAtMost(n)
     }
@@ -1130,9 +1253,310 @@ object Summarizer {
         return exp(-x * x)
     }
 
-    private fun storySections(sents: List<Sent>, length: Length, pack: LangPack): Pair<List<Section>, List<Sent>> {
-        val n = sents.size
+    private fun isFuncWord(t: String, pack: LangPack): Boolean {
+        val x = "$t "
+        return pack.contrastStart.containsMatchIn(x) || pack.anaphora.containsMatchIn(x) || PRON_START.containsMatchIn(x) ||
+            RESULT_START.containsMatchIn(x) || pack.numWords.containsKey(t)
+    }
 
+    /**
+     * Karakter izleme: büyük harfli özel adları (cümle başı ve ek parçaları ayıklanarak) bulur, "Usta Cemal" gibi çok sözcüklü adları
+     * birleştirir, "Cemal" / "Usta Cemal" gibi farklı hitapları aynı karaktere bağlar, her cümlede kimin geçtiğini ve özneyi işaretler,
+     * ilk görünüş (tanıtım) cümlesini ve iki önemli karakterin ilk karşılaşmasını bulur. Dil büyük/küçük harf ayrımı yapmıyorsa (AR) ya da
+     * tüm isimler büyük harfliyse (DE) devre dışıdır (null döner); hikâye motoru bu durumda karaktersiz çalışır.
+     */
+    private fun buildChars(sents: List<Sent>, pack: LangPack): CharModel? {
+        if (!pack.hasCase || pack.code == "de") return null
+        val n = sents.size
+        class Tok(val lw: String, val cap: Boolean, val start: Int, val end: Int)
+        val capMid = HashMap<String, Int>()
+        val capInit = HashMap<String, Int>()
+        val lowCnt = HashMap<String, Int>()
+        val surf = HashMap<String, HashMap<String, Int>>()
+        val toks = ArrayList<List<Tok>>(n)
+        for (s in sents) {
+            val list = ArrayList<Tok>()
+            var prevEnd = -1
+            for (m in WORD.findAll(s.text)) {
+                val st = m.range.first
+                val e = m.range.last
+                // "Elif'in" -> "in": kesme işaretinden sonraki ek parçası ad değildir
+                if (st > 0 && (s.text[st - 1] == '\'' || s.text[st - 1] == '’')) { prevEnd = e; continue }
+                val w = m.value
+                val lw = pack.lower(w)
+                val cap = w.length >= 2 && w[0].isUpperCase() && w.drop(1).any { it.isLowerCase() }
+                var init = list.isEmpty()
+                if (!init && prevEnd >= 0 && s.text.substring(prevEnd + 1, st).any { it in ":\"“”«»—–(!?.…;" }) init = true
+                list.add(Tok(lw, cap, st, e))
+                prevEnd = e
+                if (cap) {
+                    if (init) capInit[lw] = (capInit[lw] ?: 0) + 1 else capMid[lw] = (capMid[lw] ?: 0) + 1
+                    val sm = surf.getOrPut(lw) { HashMap() }
+                    sm[w] = (sm[w] ?: 0) + 1
+                } else {
+                    lowCnt[lw] = (lowCnt[lw] ?: 0) + 1
+                }
+            }
+            toks.add(list)
+        }
+        fun okTok(t: String) = t.length >= 3 && t !in pack.stop && t !in pack.generic && t !in STRUCT &&
+            !pack.months.matches(t) && !isFuncWord(t, pack) && !(pack.code == "tr" && t in TR_GEN)
+        // aday: cümle ortasında büyük harfle geçen ve küçük harfli biçimi seyrek olan sözcük
+        val cand = HashSet<String>()
+        for ((t, cm0) in capMid) {
+            val ci = capInit[t] ?: 0
+            if (okTok(t) && (lowCnt[t] ?: 0) <= max(1, ((cm0 + ci) * 0.25).toInt())) cand.add(t)
+        }
+        // yalnızca cümle başında görünen ama hiç küçük harfle yazılmayan sık adlar
+        for ((t, ci) in capInit) {
+            if (t !in cand && ci >= 5 && (lowCnt[t] ?: 0) == 0 && (capMid[t] ?: 0) == 0 && okTok(t)) cand.add(t)
+        }
+        if (cand.isEmpty()) return null
+
+        // çok sözcüklü adlar: "Usta Cemal", "Nine Fatma". Bitişik iki aday yalnızca çoğunlukla BİRLİKTE geçiyorsa bağlanır;
+        // "Cemal Elif'in" gibi tesadüfen yan yana gelen farklı karakterler birleştirilmez.
+        val totalCap = HashMap<String, Int>()
+        val pairCnt = HashMap<String, Int>()
+        for (list in toks) {
+            for (i in list.indices) {
+                val t = list[i]
+                if (!t.cap || t.lw !in cand) continue
+                totalCap[t.lw] = (totalCap[t.lw] ?: 0) + 1
+                if (i + 1 < list.size) {
+                    val u = list[i + 1]
+                    if (u.cap && u.lw in cand && u.start - t.end == 2) {
+                        val k = t.lw + " " + u.lw
+                        pairCnt[k] = (pairCnt[k] ?: 0) + 1
+                    }
+                }
+            }
+        }
+        fun linked(a: String, b: String): Boolean {
+            val pc = pairCnt["$a $b"] ?: 0
+            return pc >= 2 && pc.toDouble() >= 0.6 * min(totalCap[a] ?: 1, totalCap[b] ?: 1)
+        }
+        val fullCnt = HashMap<String, Int>()
+        val fullToks = HashMap<String, List<String>>()
+        for (list in toks) {
+            var i = 0
+            while (i < list.size) {
+                if (!list[i].cap || list[i].lw !in cand) { i++; continue }
+                var j = i
+                while (j + 1 < list.size && j - i < 2 && list[j + 1].cap && list[j + 1].lw in cand &&
+                    list[j + 1].start - list[j].end == 2 && linked(list[j].lw, list[j + 1].lw)) j++
+                if (j > i) {
+                    val key = (i..j).joinToString(" ") { list[it].lw }
+                    fullCnt[key] = (fullCnt[key] ?: 0) + 1
+                    fullToks[key] = (i..j).map { list[it].lw }
+                }
+                i = j + 1
+            }
+        }
+        fun surfOf(t: String): String =
+            surf[t]?.maxByOrNull { it.value }?.key ?: t.replaceFirstChar { it.titlecase(pack.locale) }
+
+        val alias = HashMap<String, Int>()
+        val ambiguous = HashSet<String>()
+        val chars = ArrayList<Chr>()
+        fun addAlias(a: String, id: Int) {
+            val o = alias[a]
+            if (o == null) alias[a] = id else if (o != id) ambiguous.add(a)
+        }
+        for ((key, c) in fullCnt.entries.sortedByDescending { it.value }) {
+            if (c < 2) continue
+            val tk = fullToks[key] ?: continue
+            val ch = Chr(chars.size, tk.joinToString(" ") { surfOf(it) })
+            chars.add(ch)
+            for (t in tk) addAlias(t, ch.id)
+        }
+        for (t in cand.sortedByDescending { (capMid[it] ?: 0) + (capInit[it] ?: 0) }) {
+            if (t in alias || (capMid[t] ?: 0) + (capInit[t] ?: 0) < 2) continue
+            val ch = Chr(chars.size, surfOf(t))
+            chars.add(ch)
+            alias[t] = ch.id
+        }
+        for (a in ambiguous) alias.remove(a)
+        if (chars.isEmpty()) return null
+        val nameStems = HashSet<String>()
+        for (a in alias.keys) nameStems.add(pack.stem(a))
+
+        val spanSeen = Array(chars.size) { BooleanArray(8) }
+        for ((i, s) in sents.withIndex()) {
+            val list = toks[i]
+            val ids = ArrayList<Int>()
+            var firstId = -1
+            var firstPos = -1
+            var lastId = -1
+            for ((ti, t) in list.withIndex()) {
+                if (!t.cap) continue
+                val id = alias[t.lw] ?: continue
+                if (id !in ids) ids.add(id)
+                if (firstId < 0) { firstId = id; firstPos = ti }
+                lastId = id
+            }
+            s.cs = ids.toIntArray()
+            if (ids.isEmpty()) continue
+            // konuşma satırında özne genelde "dedi X" ile sonda; anlatımda ilk ad (en fazla 5. sözcüğe kadar)
+            s.subj = if (s.dialogue && SPEECH.containsMatchIn(s.lower)) lastId else if (firstPos <= 4) firstId else -1
+            for (id in ids) {
+                val c = chars[id]
+                c.mentions++
+                if (c.first < 0) c.first = i
+                c.last = i
+                spanSeen[id][min(7, i * 8 / n)] = true
+                if (!s.dialogue && c.introIdx < 0 && s.words >= 4) c.introIdx = i
+            }
+            if (s.subj >= 0) chars[s.subj].acts++
+        }
+        val kept = chars.filter { it.mentions > 0 }
+        if (kept.isEmpty()) return null
+        val minM = if (n < 20) 2 else 3
+        for (c in kept) {
+            c.spans = spanSeen[c.id].count { it }
+            c.imp = c.mentions * (0.5 + c.spans / 8.0) + 0.5 * c.acts
+            c.major = c.mentions >= minM
+            if (c.introIdx < 0) c.introIdx = c.first
+        }
+        val major = kept.filter { it.major }.map { it.id }.toHashSet()
+        for (c in kept) if (c.major) sents[c.introIdx].introN++
+        val seenPair = HashSet<Long>()
+        for (s in sents) {
+            val ms = s.cs.filter { it in major }
+            if (ms.size < 2) continue
+            for (a in ms.indices) for (b in a + 1 until ms.size) {
+                if (seenPair.add(min(ms[a], ms[b]).toLong() * 100000L + max(ms[a], ms[b]))) s.meet = true
+            }
+        }
+        return CharModel(kept.sortedByDescending { it.imp }, nameStems)
+    }
+
+    private fun lead(s: Sent): String = s.lower.trimStart { !it.isLetter() }
+
+    /** Cümle düzeyi hikâye özellikleri: karar, çatışma, açığa çıkış, değişim, sonuç, zaman atlaması, zamir başlangıcı; karakter-eylem-nesne-sonuç bayrakları. */
+    private fun storyFeatures(sents: List<Sent>, cm: CharModel?, pack: LangPack) {
+        val nameStems = cm?.nameStems ?: emptySet()
+        for (s in sents) {
+            val l = s.lower
+            val ls = lead(s)
+            s.fDec = DECISION.containsMatchIn(l)
+            s.fConf = CONFLICT.containsMatchIn(l)
+            s.fRev = REVEAL.containsMatchIn(l)
+            s.fChg = CHANGE.containsMatchIn(l)
+            s.fRes = RESOLUTION.containsMatchIn(l)
+            s.fNew = NEWEV.containsMatchIn(l)
+            s.fTime = TIME_SHIFT.containsMatchIn(l)
+            s.fResStart = RESULT_START.containsMatchIn(ls)
+            s.fPron = PRON_START.containsMatchIn(ls) || DEMO_START.containsMatchIn(ls)
+            val past = WORD.findAll(l).any { it.value.length >= 4 && pack.isPast(it.value) }
+            s.act = s.subj >= 0 && (past || pack.storyCue.containsMatchIn(l))
+            s.obj = s.stemSet.count { it !in nameStems } >= 3
+        }
+        for (i in 0 until sents.size - 1) {
+            val nx = sents[i + 1]
+            sents[i].resNext = (nx.fResStart || nx.fRes) && nx.para == sents[i].para
+        }
+    }
+
+    /**
+     * Dinamik olay bölütleme: sabit eşit dilimler yerine, konu geçişi (kelime örtüşmesi düşüşü), başlık/paragraf sınırı, zaman atlaması
+     * ("ertesi sabah") ve sahnedeki karakter kümesinin değişmesi birlikte bir "sınır gücü" verir; en güçlü sınırlar olay başlangıcı olur.
+     * Zamirle ya da sonuç bağlacıyla başlayan cümlenin önüne sınır konmaz (önceki cümlenin devamıdır). Çok uzun olaylar iç sınırdan bölünür.
+     */
+    private fun storyEvents(sents: List<Sent>, hasChars: Boolean, target: Int): List<Ev> {
+        val n = sents.size
+        if (target <= 1 || n < 6) return listOf(Ev(0, n))
+        val w = (n / 30).coerceIn(3, 8)
+        fun block(from: Int, to: Int): Map<String, Int> {
+            val m = HashMap<String, Int>()
+            for (i in from until to) for (t in sents[i].stemSet) m[t] = (m[t] ?: 0) + 1
+            return m
+        }
+        fun chars(from: Int, to: Int): Set<Int> {
+            val r = HashSet<Int>()
+            for (i in from until to) for (c in sents[i].cs) r.add(c)
+            return r
+        }
+        val str = DoubleArray(n)
+        for (b in 2 until n - 1) {
+            val lo = max(0, b - w)
+            val hi = min(n, b + w)
+            val s = sents[b]
+            var v = 0.30 * (1.0 - cosine(block(lo, b), block(b, hi)))
+            if (s.heading != sents[b - 1].heading) v += 0.5
+            if (s.para != sents[b - 1].para) v += 0.12
+            if (s.fTime) v += 0.35
+            if (hasChars) {
+                val a = chars(max(lo, b - 3), b)
+                val c = chars(b, min(hi, b + 3))
+                if (a.isNotEmpty() && c.isNotEmpty()) {
+                    var inter = 0
+                    for (x in a) if (x in c) inter++
+                    v += 0.25 * (1.0 - inter.toDouble() / (a.size + c.size - inter))
+                }
+            }
+            if (s.fPron || s.fResStart) v -= 0.3
+            str[b] = max(0.0, v)
+        }
+        val gap = max(3, n / (target * 3))
+        val cuts = ArrayList<Int>()
+        for (b in (2 until n - 1).sortedByDescending { str[it] }) {
+            if (cuts.size >= target - 1) break
+            if (str[b] < 0.2) break
+            if (cuts.any { abs(it - b) < gap }) continue
+            cuts.add(b)
+        }
+        cuts.sort()
+        // çok uzun olayları en güçlü iç sınırdan (yoksa ortadan) böl
+        val maxLen = max(10, 2 * n / target)
+        var changed = true
+        while (changed) {
+            changed = false
+            val bounds = listOf(0) + cuts + listOf(n)
+            for (k in 0 until bounds.size - 1) {
+                val a = bounds[k]
+                val z = bounds[k + 1]
+                if (z - a <= maxLen) continue
+                val inner = (a + 3 until z - 2)
+                val best = inner.maxByOrNull { str[it] } ?: continue
+                cuts.add(if (str[best] > 0.1) best else (a + z) / 2)
+                cuts.sort()
+                changed = true
+                break
+            }
+        }
+        val bounds = listOf(0) + cuts + listOf(n)
+        return (0 until bounds.size - 1).map { Ev(bounds[it], bounds[it + 1]) }
+    }
+
+    /** Öznesi/göndermesi için bağlam gereken cümle: 0 = yok, 1 = açık zamir/gösterme/sonuç bağlacı, 2 = adsız eylem cümlesi (tahmin). */
+    private fun actorGap(s: Sent, pack: LangPack): Int {
+        if (s.bullet || s.isDef || s.isClass || s.dialogue) return 0
+        val ls = lead(s)
+        val named = s.cs.isNotEmpty()
+        if (s.fResStart) return 1
+        if (DEMO_START.containsMatchIn(ls)) return 1
+        if (PRON_START.containsMatchIn(ls)) return 1
+        if (pack.anaphora.containsMatchIn(ls)) return 1
+        if (EARLY_DEMO.containsMatchIn(ls.split(' ').take(3).joinToString(" "))) return 1
+        if (!named && (s.fDec || s.fConf || s.fRev || pack.storyCue.containsMatchIn(s.lower)) && s.words <= 30) return 2
+        return 0
+    }
+
+    private fun needsActor(s: Sent, pack: LangPack): Boolean = actorGap(s, pack) > 0
+
+    /** Diyalogda cevap cümlesi, hemen önceki soru olmadan anlaşılmaz. */
+    private fun needsQuestion(s: Sent, sents: List<Sent>): Boolean =
+        s.dialogue && s.idx > 0 && sents[s.idx - 1].dialogue && sents[s.idx - 1].text.trimEnd('"', '”', '»', ' ').endsWith("?") && !s.text.contains('?')
+
+    /** Konuşan kişi: yalnızca diyalog öznesi/konuşma fiili için güvenilir; "diye bağırdı X'e" gibi hitap edilen kişiyi konuşan sayma. */
+    private val SUBJ_PRON = Regex("""^(?:o|onlar|he|she|they|er|sie|él|ella|ellos|il|elle|ils|هو|هي|هم)\s""")
+
+    private fun storySections(sents: List<Sent>, length: Length, pack: LangPack, weights: Map<String, Double>): StoryOut {
+        val n = sents.size
+        val notes = ArrayList<String>()
+        val cm = try { buildChars(sents, pack) } catch (e: Exception) { null }
+
+        // Eski yöntem (karakter modeli kurulamayan diller için yedek): sık geçen büyük harfli adın ilk görünüşü
         val nameFreq = HashMap<String, Int>()
         val namesOf = ArrayList<List<String>>(n)
         for (s in sents) {
@@ -1147,11 +1571,25 @@ object Summarizer {
                 if ((nameFreq[x] ?: 0) >= 4 && seen.add(x)) newChar[i] = true
             }
         }
+        storyFeatures(sents, cm, pack)
+        val salientSet = HashSet<String>()
+        // Sözlükten bağımsız sinyal: hikâyede ilk kez geçen ve sonra yeniden anılan belirgin kavram (yeni nesne/varlık/mekân tanıtımı)
+        run {
+            val df = HashMap<String, Int>()
+            val firstAt = HashMap<String, Int>()
+            for (s in sents) for (t in s.stemSet) { df[t] = (df[t] ?: 0) + 1; if (t !in firstAt) firstAt[t] = s.idx }
+            val nm = cm?.nameStems ?: emptySet<String>()
+            val pool = df.filter { it.value >= 2 && it.value <= max(3, n / 6) && it.key !in nm }.keys.sortedByDescending { weights[it] ?: 0.0 }
+            val salient = pool.take(max(5, pool.size * 15 / 100)).toHashSet()
+            salientSet.addAll(salient)
+            val opening = max(3, n / 12)   // açılışta her şey ilk kez geçer; yeni öğe sayılması için açılıştan sonra gelmeli
+            for (t in salient) { val f = firstAt[t] ?: continue; if (f >= opening && !sents[f].dialogue) sents[f].newObj = min(2, sents[f].newObj + 1) }
+        }
 
         for (i in 0 until n) {
             val s = sents[i]
             var v = 0.5 * s.base + 0.5 * s.rank
-            v += 0.08 * min(namesOf[i].size, 3)
+            v += 0.08 * min(max(namesOf[i].size, s.cs.size), 3)
             if (pack.storyCue.containsMatchIn(s.lower)) v += 0.15
             if (s.dialogue) v *= 0.6
             if (s.text.length > 300) v *= 0.8
@@ -1164,55 +1602,233 @@ object Summarizer {
             Length.LONG -> Pair(16, 12)
         }
         val m = cfg.second
-        val k = max(1, min(cfg.first, n / 3))
-        val picks = ArrayList<Sent>()
-        for (seg in 0 until k) {
-            val from = seg * n / k
-            val to = (seg + 1) * n / k
-            if (to <= from) continue
-            var best: Sent? = null
-            for (i in from until to) {
-                if (best == null || sents[i].score > best.score) best = sents[i]
+        val budget = max(1, min(cfg.first, n / 3))
+        val target = max(1, min(ceil(budget * 0.6).toInt(), n / 5))
+        val events = storyEvents(sents, cm != null, target)
+        for ((ei, e) in events.withIndex()) for (i in e.from until e.to) sents[i].ev = ei
+
+        // ---- olay içi önem (karakter + eylem + nesne + sonuç + dönüm özellikleri)
+        val hasCm = cm != null
+        for (s in sents) {
+            var v = s.score
+            if (s.introN > 0) v += 0.25
+            if (s.meet) v += 0.3
+            if (!hasCm && newChar[s.idx]) v += 0.3
+            if (s.fDec) v += 0.22
+            if (s.fConf) v += 0.18
+            if (s.fRev) v += 0.2
+            if (s.fChg) v += 0.2
+            if (s.fRes) v += 0.2
+            if (s.fNew) v += 0.12
+            if (s.subj >= 0 && cm?.byId?.get(s.subj)?.major == true) v += 0.08
+            if (s.act) v += 0.08
+            if (s.obj) v += 0.04
+            if (s.resNext) v += 0.12
+            v += 0.08 * s.newObj
+            if (needsActor(s, pack)) v -= 0.08
+            if (s.dialogue && !(s.fDec || s.fRev || s.introN > 0 || s.meet)) v *= 0.6
+            s.evs = v
+        }
+        for (e in events) {
+            val top = (e.from until e.to).map { sents[it].evs }.sortedDescending().take(3)
+            e.value = top.average() + 0.1 * ln(1.0 + (e.to - e.from))
+        }
+        val maxV = max(1e-9, events.maxOf { it.value })
+
+        fun role(s: Sent): Int {
+            val e = events[s.ev]
+            val len = e.to - e.from
+            val p = if (len <= 1) 0.5 else (s.idx - e.from).toDouble() / (len - 1)
+            return if (p < 0.34) 0 else if (p > 0.66) 2 else 1
+        }
+        fun roleScore(s: Sent): Double {
+            var v = s.evs
+            when (role(s)) {
+                0 -> if (s.introN > 0 || s.fTime || s.cs.isNotEmpty()) v += 0.12
+                2 -> if (s.fRes || s.resNext || s.fRev) v += 0.12
+                else -> if (s.fConf || s.fDec || s.fRev) v += 0.08
             }
-            if (best != null) picks.add(best)
+            return v
+        }
+        fun pool(ei: Int, r: Int): List<Sent> {
+            val e = events[ei]
+            val all = (e.from until e.to).map { sents[it] }
+            val f = if (r < 0) all else all.filter { role(it) == r }
+            return (if (f.isEmpty()) all else f).sortedByDescending { roleScore(it) }
         }
 
-        val pickSet = HashSet<Sent>(picks)
-        val ev = DoubleArray(n)
-        for (i in 0 until n) {
-            val s = sents[i]
-            var v = 0.3 * s.base
-            var cues = 0
-            for (c in pack.storyCue.findAll(s.lower)) {
-                cues++
-                if (cues >= 3) break
+        // ---- 1) önemli olaylardan (ve ilk/son olaydan) birer cümle: ilk olaydan başlangıç, son olaydan sonuç, diğerlerinden en iyi
+        val picked = LinkedHashSet<Sent>()
+        val perEv = IntArray(events.size)
+        for (ei in events.indices) {
+            val first = events.size > 1 && ei == 0
+            val last = events.size > 1 && ei == events.size - 1
+            if (!first && !last && events[ei].value / maxV < 0.6) continue
+            val cands = pool(ei, if (first) 0 else if (last) 2 else -1)
+            val p = cands.firstOrNull { !redundant(it, picked) } ?: cands.firstOrNull() ?: continue
+            picked.add(p); perEv[ei]++
+        }
+        // ---- 2) kalan bütçe: tüm cümleler arasında olay önemiyle ağırlıklı en iyiler (olay başına en çok 3; komşu/benzer seçilmez)
+        val rest = sents.filter { it !in picked }.sortedByDescending { roleScore(it) * (0.7 + 0.3 * events[it.ev].value / maxV) }
+        // Zaman çizelgesinde yığılmayı önlemek için ilk turda en az (n / 2·bütçe) cümle aralık aranır; dolmazsa ikinci turda gevşetilir.
+        val minGap = max(2, n / (2 * budget))
+        for (sweep in 0 until 2) {
+            for (c in rest) {
+                if (picked.size >= budget) break
+                if (c in picked || perEv[c.ev] >= 3 || redundant(c, picked)) continue
+                if (picked.any { q -> q.ev == c.ev && abs(q.idx - c.idx) <= 1 } && !(c.fResStart || c.resNext)) continue
+                if (sweep == 0 && picked.any { q -> abs(q.idx - c.idx) < minGap }) continue
+                picked.add(c); perEv[c.ev]++
             }
-            v += 0.25 * cues
-            if (s.text.contains('!')) v += 0.1
-            if (newChar[i]) v += 0.35
-            if (pack.contrastStart.containsMatchIn(s.lower)) v += 0.25
-            val pos = i.toDouble() / max(1, n - 1)
-            v += 0.12 * bump(pos, 0.12, 0.07) + 0.12 * bump(pos, 0.5, 0.08) +
-                0.3 * bump(pos, 0.78, 0.07) + 0.1 * bump(pos, 0.96, 0.04)
-            if (s.dialogue) v *= 0.8
-            if (s in pickSet) v *= 0.55
-            ev[i] = v
         }
-        val gap = max(1, n / (m * 2))
-        val order = (0 until n).sortedByDescending { ev[it] }
-        val tp = ArrayList<Int>()
-        for (i in order) {
-            if (tp.size >= m) break
-            if (tp.any { abs(it - i) < gap }) continue
-            tp.add(i)
+
+        // ---- 3) bağlam koruma: tek başına anlaşılmayan cümleler için komşu cümle (üst sınırlı); yalnızca tek-göndermeli zamirde kısa etiket
+        val ctxCap = max(1, ceil(budget * 0.3).toInt())
+        val finalSet = HashSet<Sent>(picked)
+        val labels = HashMap<Sent, String>()
+        var ctxAdded = 0
+        var labelAdded = 0
+        var prev: Sent? = null
+        for (s in picked.sortedBy { it.idx }) {
+            val gap = actorGap(s, pack)
+            val q = needsQuestion(s, sents)
+            if (gap > 0 || q) {
+                var j = -1
+                if (q || gap == 1) j = s.idx - 1
+                else for (k in s.idx - 1 downTo max(0, s.idx - 3)) if (sents[k].subj >= 0 && !sents[k].dialogue) { j = k; break }
+                val actor = if (j >= 0) sents[j].subj else -1
+                val ok = prev != null && (prev.idx == s.idx - 1 || (actor >= 0 && prev.subj == actor && s.idx - prev.idx <= 3) || (j >= 0 && prev.idx >= j))
+                if (!ok && j >= 0) {
+                    val c = sents[j]
+                    val adjacentOk = gap == 2 && c.idx != s.idx - 1   // adsız-eylem tahmininde yalnızca hemen önceki cümle eklenir
+                    if (!adjacentOk && c !in finalSet && ctxAdded < ctxCap && c.words <= 28 && !redundant(c, finalSet)) {
+                        finalSet.add(c); ctxAdded++
+                    } else if (gap == 1 && SUBJ_PRON.containsMatchIn(lead(s)) && cm != null && c.idx == s.idx - 1 && c.cs.size == 1 && c.subj == c.cs[0] && c.words > 28) {
+                        labels[s] = cm.byId[c.subj]?.name ?: ""
+                        labelAdded++
+                    }
+                }
+            }
+            prev = s
         }
-        tp.sort()
+        // ---- 4) şişme kontrolü: bağlam eklenince bütçe aşılırsa en düşük değerli, korunmasız asıl seçimi çıkar
+        val protectedIdx = HashSet<Int>()
+        events.firstOrNull()?.let { e -> picked.filter { it.ev == 0 }.minByOrNull { it.idx }?.let { protectedIdx.add(it.idx) } }
+        events.lastOrNull()?.let { e -> picked.filter { it.ev == events.size - 1 }.maxByOrNull { it.idx }?.let { protectedIdx.add(it.idx) } }
+        var guard2 = 0
+        while (finalSet.size > budget + ctxCap && guard2++ < 50) {
+            val drop = finalSet.filter { it in picked && it.idx !in protectedIdx }.minByOrNull { it.evs } ?: break
+            finalSet.remove(drop)
+        }
+        val summaryList = finalSet.sortedBy { it.idx }
+        val summaryItems = summaryList.map { s -> val t = display(s); labels[s]?.let { "[$it] $t" } ?: t }.distinct()
+
+        // ---- dönüm noktaları
+        val summarySet = HashSet<Sent>(summaryList)
+        val cntMajor = cm?.list?.count { it.major } ?: 0
+        for (s in sents) {
+            var nf = 0
+            var v = 0.0
+            if (s.fDec) { v += 0.35; nf++ }
+            if (s.fRev) { v += 0.32; nf++ }
+            if (s.fChg) { v += 0.30; nf++ }
+            if (s.fRes) { v += 0.30; nf++ }
+            if (s.fConf) { v += 0.28; nf++ }
+            if (s.newObj > 0) { v += 0.16 * s.newObj; nf++ }
+            if (s.fNew) { v += 0.22; nf++ }
+            val core = nf
+            if (s.introN > 0) { v += 0.10; nf++ }
+            if (s.meet && s.idx > n / 10) { v += 0.10; nf++ }
+            if (s.idx == events[s.ev].from && (s.fTime || (s.idx > 0 && s.heading != sents[s.idx - 1].heading))) { v += 0.22; nf++ }
+            if (s.act && s.resNext) { v += 0.25; nf++ } else if (s.resNext) v += 0.10
+            if (!hasCm && newChar[s.idx]) { v += 0.25; nf++ }
+            if (core == 0 || (s.dialogue && !(s.fDec || s.fRev))) { s.tps = 0.0; continue }
+            if (nf >= 2) v += 0.08 * min(2, nf - 1)
+            if (s.subj >= 0 && cm?.byId?.get(s.subj)?.major == true) v += 0.08
+            if (s.obj) v += 0.04
+            v += 0.15 * (events[s.ev].value / maxV)
+            val pos = s.idx.toDouble() / max(1, n - 1)
+            v += 0.05 * bump(pos, 0.12, 0.07) + 0.05 * bump(pos, 0.5, 0.08) + 0.08 * bump(pos, 0.78, 0.1) + 0.04 * bump(pos, 0.96, 0.04)
+            if (s.dialogue && !(s.fDec || s.fRev)) v *= 0.55
+            if (s.text.length > 300) v *= 0.8
+            if (s in summarySet) v *= 0.6
+            if (needsActor(s, pack)) v *= 0.85
+            s.tps = v
+        }
+        val nameStems = cm?.nameStems ?: emptySet<String>()
+        fun content(s: Sent): Set<String> = s.stemSet.filter { it !in nameStems }.toSet()
+        fun sameAction(a: Sent, b: Sent): Boolean {
+            val ca = content(a)
+            val cb = content(b)
+            if (jaccard(ca, cb) > 0.45) return true
+            if (a.subj >= 0 && a.subj == b.subj && ca.count { it in cb } >= 2) return true
+            return false
+        }
+        val tpMax = min(m, max(3, n / 6))
+        val tpGap = max(1, n / (m * 3))
+        val tp = ArrayList<Sent>()
+        val perEvTp = IntArray(events.size)
+        val ranked = sents.filter { it.tps > 0.0 }.sortedByDescending { it.tps }
+        for (pass in 0 until 2) {
+            for (s in ranked) {
+                if (tp.size >= tpMax) break
+                if (s in tp) continue
+                if (s in summarySet) continue
+                if (pass == 0 && perEvTp[s.ev] >= 1) continue
+                if (pass == 1 && perEvTp[s.ev] >= 2) continue
+                if (tp.any { abs(it.idx - s.idx) < tpGap || sameAction(it, s) }) continue
+                tp.add(s); perEvTp[s.ev]++
+            }
+        }
+        // çok az gerçek dönüm noktası bulunduysa (olaysız/yalın metin): en yüksek olay önemli cümlelerle tamamla
+        if (tp.size < min(3, tpMax)) {
+            for (s in sents.sortedByDescending { it.evs }) {
+                if (tp.size >= min(3, tpMax)) break
+                if (s in tp || s in summarySet || tp.any { abs(it.idx - s.idx) < tpGap || sameAction(it, s) }) continue
+                tp.add(s)
+            }
+        }
+        tp.sortBy { it.idx }
+        val tpItems = tp.map { s ->
+            val t = display(s)
+            val pv = if (s.idx > 0) sents[s.idx - 1] else null
+            if (cm != null && pv != null && actorGap(s, pack) == 1 && SUBJ_PRON.containsMatchIn(lead(s)) && pv.cs.size == 1 && pv.subj == pv.cs[0])
+                "[" + (cm.byId[pv.subj]?.name ?: "") + "] " + t
+            else t
+        }
+
+        notes.add("olay=" + events.size + "(" + events.joinToString(",") { (it.to - it.from).toString() } + ")")
+        if (cm != null) {
+            notes.add("karakter=" + cm.list.filter { it.major }.take(8).joinToString(",") { it.name + "(" + it.mentions + ")" })
+            val pairs = HashMap<String, Int>()
+            for (s in sents) {
+                val ids = s.cs.filter { cm.byId[it]?.major == true }.sorted()
+                for (a in ids.indices) for (b in a + 1 until ids.size) {
+                    val k = cm.byId[ids[a]]!!.name + "-" + cm.byId[ids[b]]!!.name
+                    pairs[k] = (pairs[k] ?: 0) + 1
+                }
+            }
+            notes.add("iliski=" + pairs.entries.sortedByDescending { it.value }.take(5).joinToString(",") { it.key + "(" + it.value + ")" })
+        } else notes.add("karakter=model-yok")
+        notes.add("baglam-cumlesi=$ctxAdded etiket=$labelAdded ozet=" + summaryList.size + " donum=" + tp.size)
+        if (cntMajor == 0 && cm != null) notes.add("buyuk-karakter-yok")
 
         val sections = listOf(
-            Section(null, picks.sortedBy { it.idx }.map { display(it) }.distinct(), SectionKind.PARAGRAPHS, SecTitle.SUMMARY),
-            Section(null, tp.map { display(sents[it]) }, SectionKind.NUMBERED, SecTitle.TURNING)
+            Section(null, summaryItems, SectionKind.PARAGRAPHS, SecTitle.SUMMARY),
+            Section(null, tpItems, SectionKind.NUMBERED, SecTitle.TURNING)
         )
-        return Pair(sections, picks + tp.map { sents[it] })
+        val spreadMap = HashMap<String, Int>()
+        for (e in events) {
+            val u = HashSet<String>()
+            for (i in e.from until e.to) u.addAll(sents[i].stemSet)
+            for (t in u) spreadMap[t] = (spreadMap[t] ?: 0) + 1
+        }
+        // zaman geçişi cümlelerinde ağırlıklı geçen kavramlar ("sabah", "gece", "ertesi"...) tema/nesne değil, anlatı iskeletidir
+        val inTime = HashMap<String, Int>()
+        val inAll = HashMap<String, Int>()
+        for (sx in sents) for (t in sx.stemSet) { inAll[t] = (inAll[t] ?: 0) + 1; if (sx.fTime) inTime[t] = (inTime[t] ?: 0) + 1 }
+        val timeish = inTime.filter { (inAll[it.key] ?: 0) >= 2 && it.value * 10 >= (inAll[it.key] ?: 1) * 4 }.keys.toHashSet()
+        return StoryOut(sections, summaryList + tp, notes, cm?.list?.filter { it.major } ?: emptyList(), cm?.nameStems ?: emptySet(), spreadMap, events.size, salientSet, timeish)
     }
 
     // ------------------------------------------------------------------ anahtar kelimeler
@@ -1318,6 +1934,8 @@ object Summarizer {
             for (m in WORD.findAll(s.text)) {
                 val orig = m.value
                 val low = pack.lower(orig)
+                // "Nine Fatma'nın" -> "nın": kesme işaretinden sonraki çekim eki anahtar kelime adayı değildir
+                if (m.range.first > 0 && (s.text[m.range.first - 1] == '\'' || s.text[m.range.first - 1] == '’')) { prevStem = null; continue }
                 val first = wi == 0
                 wi++
                 val cand = low.length >= 3 && low !in pack.stop && low !in pack.generic && low !in STRUCT && !(pack.code == "tr" && low in TR_GEN) && !pack.months.matches(low)
@@ -1395,6 +2013,39 @@ object Summarizer {
         return out.take(40)
     }
 
+    /**
+     * Hikâye modu için aday yeniden sıralama (yalnızca Mode.STORY; ders notu anahtar kelimeleri etkilenmez):
+     * - Ana karakterlerin adları aday olarak eklenir ("Usta Cemal"); ad + sıradan sözcük bitişikliği ("Elif Harita") elenir.
+     * - Hikâyenin birçok olayına yayılan (tema/nesne) ve yeni öğe olarak tanıtılan kavramlar ağırlıklanır; tek sahneye sıkışanlar azaltılır.
+     * Son süzgeç (özette geçme, tekrar birleştirme, üst sınır) yine finalKeywords tarafından uygulanır.
+     */
+    private fun storyCands(cands: List<Kw>, so: StoryOut, pack: LangPack): List<Kw> {
+        val top = cands.maxOfOrNull { it.score } ?: 1.0
+        val out = ArrayList<Kw>()
+        val charStems = HashSet<String>()
+        val nameKeys = HashSet<String>()
+        var rank = 0
+        for (c in so.chars.sortedByDescending { it.imp }.take(6)) {
+            val toks = c.name.split(' ').map { pack.stem(pack.lower(it)) }
+            charStems.addAll(toks)
+            nameKeys.add(toks.joinToString(" "))
+            out.add(Kw("char:" + c.name, c.name, toks.toSet(), c.mentions, toks.size > 1, top * (1.15 - 0.05 * rank)))
+            rank++
+        }
+        for (k in cands) {
+            // ad + sıradan sözcük birleşimi (ör. "Elif Harita"): ad çiftlerini koru, diğerlerini ele
+            if (k.phrase && k.stems.any { it in so.nameStems } && k.key !in nameKeys) continue
+            if (!k.phrase && k.stems.all { it in charStems }) continue   // ad zaten karakter olarak var
+            val sp = so.spread[k.stems.first()] ?: 1
+            val spreadF = if (so.nEv >= 3 && !k.phrase) 0.6 + 0.8 * min(1.0, sp.toDouble() / so.nEv) else 1.0
+            val salF = if (k.stems.any { it in so.salient }) 1.12 else 1.0
+            val timeF = if (!k.phrase && k.stems.all { it in so.timeish }) 0.4 else 1.0
+            out.add(Kw(k.key, k.surface, k.stems, k.tf, k.phrase, k.score * spreadF * salF * timeF))
+        }
+        out.sortByDescending { it.score }
+        return out
+    }
+
     /** Özet seçildikten sonra: özette / başlıkta geçmeyen ve nadir kelimeleri ele, yinelenen kavramları birleştir. */
     private fun finalKeywords(cands: List<Kw>, chosen: Collection<Sent>, sents: List<Sent>, pack: LangPack): List<String> {
         val chosenStems = HashSet<String>()
@@ -1412,39 +2063,4 @@ object Summarizer {
         val ranked = ArrayList<Kw>()
         for (k in cands) {
             val inSum = k.stems.all { it in chosenStems }
-            val inHead = k.stems.all { it in headStems }
-            if (!(inSum || inHead || k.tf >= 3)) continue
-            ranked.add(Kw(k.key, k.surface, k.stems, k.tf, k.phrase, k.score * (if (inSum || inHead) 1.2 else 0.8)))
-        }
-        ranked.sortByDescending { it.score }
-        val floor = if (ranked.isEmpty()) 0.0 else ranked[0].score * 0.3
-        val cap = max(2, (limit + 2) / 3)
-        val perHead = HashMap<String, Int>()
-        fun headOf(k: Kw): String? {
-            val cnt = HashMap<String, Int>()
-            for (s in sents) {
-                val h = s.heading ?: continue
-                if (k.stems.all { it in s.stemSet }) cnt[h] = (cnt[h] ?: 0) + 1
-            }
-            return cnt.maxByOrNull { it.value }?.key
-        }
-        val picked = ArrayList<Kw>()
-        val skipped = ArrayList<Kw>()
-        for (k in ranked) {
-            if (picked.size >= limit) break
-            if (k.score < floor) break
-            if (picked.any { it.stems.containsAll(k.stems) }) continue
-            val h = headOf(k)
-            if (h != null && (perHead[h] ?: 0) >= cap) { skipped.add(k); continue }
-            if (k.phrase) picked.removeAll { !it.phrase && k.stems.containsAll(it.stems) }
-            picked.add(k)
-            if (h != null) perHead[h] = (perHead[h] ?: 0) + 1
-        }
-        for (k in skipped) {
-            if (picked.size >= limit) break
-            if (picked.any { it.stems.containsAll(k.stems) }) continue
-            picked.add(k)
-        }
-        return picked.map { it.surface }.distinctBy { it.lowercase(pack.locale) }
-    }
-}
+            val inHea
